@@ -26,6 +26,39 @@ DB_PARAMS = {
     "password": os.getenv("DB_PASS")
 }
 
+def validate_weekend_days_input(raw_text, year, month):
+    """
+    raw_text: e.g. '2, 3, 9'
+    Returns: (is_valid, cleaned_days, error_message)
+    """
+    if raw_text is None:
+        return False, [], "Dates are required."
+
+    parts = [p.strip() for p in raw_text.split(",") if p.strip()]
+    if not parts:
+        return False, [], "Please enter at least one date."
+
+    last_day = calendar.monthrange(year, month)[1]
+    seen = set()
+    cleaned = []
+
+    for p in parts:
+        if not p.isdigit():
+            return False, [], f"Invalid token '{p}'. Use only numbers separated by commas."
+        d = int(p)
+        if d < 1 or d > last_day:
+            return False, [], f"Day {d} is out of range for {year}-{month:02d}."
+
+        dt = datetime(year, month, d)
+        if dt.weekday() not in (5, 6):  # 5=Sat, 6=Sun
+            return False, [], f"{year}-{month:02d}-{d:02d} is not a Saturday/Sunday."
+
+        if d not in seen:   # keep order, remove duplicates
+            seen.add(d)
+            cleaned.append(d)
+
+    return True, cleaned, ""
+
 
 def get_db_connection():
     return psycopg2.connect(**DB_PARAMS)
@@ -446,20 +479,47 @@ def manage_availability():
                     prefs = request.form.get("preferences", "").strip()
 
                     if prefs:
-                        # Preserve user-entered order; remove duplicates without sorting
-                        raw_days = [x.strip() for x in prefs.split(",") if x.strip().isdigit()]
+                        tokens = [x.strip() for x in prefs.split(",") if x.strip()]
                         days_int = []
                         seen = set()
-                        for x in raw_days:
-                            d = int(x)
-                            if 1 <= d <= last_day and d not in seen:
+                        invalid_tokens = []
+                        non_weekend_days = []
+
+                        for t in tokens:
+                            if not t.isdigit():
+                                invalid_tokens.append(t)
+                                continue
+
+                            d = int(t)
+                            if not (1 <= d <= last_day):
+                                invalid_tokens.append(t)
+                                continue
+
+                            dt = datetime(year, month, d)
+                            if dt.weekday() not in (5, 6):  # 5=Saturday, 6=Sunday
+                                non_weekend_days.append(d)
+                                continue
+
+                            if d not in seen:  # preserve input order, remove duplicates
                                 seen.add(d)
                                 days_int.append(d)
 
-                        if not days_int:
-                            flash("No valid dates found for selected month.", "warning")
+                        if invalid_tokens:
+                            flash(
+                                f"Invalid date values: {', '.join(invalid_tokens)}. "
+                                f"Enter day numbers between 1 and {last_day}.",
+                                "warning"
+                            )
+                        elif non_weekend_days:
+                            bad = ", ".join(str(d) for d in non_weekend_days)
+                            flash(
+                                f"Only Saturday/Sunday dates are allowed. Not weekend: {bad}.",
+                                "warning"
+                            )
+                        elif not days_int:
+                            flash("No valid weekend dates found for selected month.", "warning")
                         else:
-                            dates = [f"{year}-{month:02d}-{d:02d}" for d in days_int]  # keep ranking order
+                            dates = [f"{year}-{month:02d}-{d:02d}" for d in days_int]  # ranking order preserved
                             preferred_count = max(1, len(dates) - 2)
 
                             cur.execute("""
