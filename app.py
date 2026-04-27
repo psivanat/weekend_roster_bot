@@ -448,7 +448,9 @@ def manage_availability():
     cursor.execute("""
         SELECT e.id as engineer_id, e.name, a.preferences 
         FROM engineers e 
-        LEFT JOIN availability a ON e.id = a.engineer_id AND a.year_month = %s 
+        LEFT JOIN preferences p 
+        ON e.id = p.engineer_id 
+        AND p.target_month = %s
         WHERE e.team_id = %s AND e.is_active = TRUE
         ORDER BY e.name
     """, (year_month_str, team_id))
