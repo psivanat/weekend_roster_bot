@@ -60,9 +60,8 @@ class HelloCommand(Command):
                     {"type": "TextBlock", "text": "What would you like to do today?", "wrap": True}
                 ],
                 "actions": [
-                    # FIXED: Using the strict "command" keyword required by the SDK
-                    {"type": "Action.Submit", "title": "📝 Update Next Month's Preferences", "data": {"command": "step1_preferences"}},
-                    {"type": "Action.Submit", "title": "❓ Bot Status", "data": {"command": "status"}}
+                    {"type": "Action.Submit", "title": "📝 Update Next Month's Preferences", "data": {"callback_keyword": "step1_preferences"}},
+                    {"type": "Action.Submit", "title": "❓ Bot Status", "data": {"callback_keyword": "status"}}
                 ]
             }
         }
@@ -87,6 +86,7 @@ class StatusCommand(Command):
 class Step1PreferencesCommand(Command):
     def __init__(self):
         super().__init__(command_keyword="step1_preferences", help_message="Start preference submission.", card=None)
+        self.card_callback_keyword = "step1_preferences"
 
     def execute(self, message, attachment_actions, activity):
         now = datetime.now()
@@ -117,9 +117,8 @@ class Step1PreferencesCommand(Command):
                     }
                 ],
                 "actions": [
-                    # FIXED: Using the strict "command" keyword
-                    {"type": "Action.Submit", "title": "Next ➡️", "data": {"command": "step2_preferences"}},
-                    {"type": "Action.Submit", "title": "🏖️ Opt-Out (Unavailable)", "data": {"command": "opt_out_preferences"}}
+                    {"type": "Action.Submit", "title": "Next ➡️", "data": {"callback_keyword": "step2_preferences"}},
+                    {"type": "Action.Submit", "title": "🏖️ Opt-Out (Unavailable)", "data": {"callback_keyword": "opt_out_preferences"}}
                 ]
             }
         }
@@ -134,6 +133,7 @@ class Step1PreferencesCommand(Command):
 class Step2PreferencesCommand(Command):
     def __init__(self):
         super().__init__(command_keyword="step2_preferences", help_message="Generate date dropdowns.", card=None)
+        self.card_callback_keyword = "step2_preferences"
 
     def execute(self, message, attachment_actions, activity):
         inputs = attachment_actions.inputs if attachment_actions else {}
@@ -144,15 +144,15 @@ class Step2PreferencesCommand(Command):
         next_m = now.month + 1 if now.month < 12 else 1
         next_y = now.year if now.month < 12 else now.year + 1
         target_month_str = f"{next_y}-{next_m:02d}"
-        
+
         cal = calendar.Calendar()
         weekend_dates = [day for day in cal.itermonthdates(next_y, next_m) if day.month == next_m and day.weekday() in [5, 6]]
-        
+
         if min_required > len(weekend_dates):
             min_required = len(weekend_dates)
 
         date_choices = [{"title": d.strftime("%A, %b %d"), "value": d.strftime("%Y-%m-%d")} for d in weekend_dates]
-        
+
         form_body = [
             {"type": "TextBlock", "text": "📅 Step 2: Rank Your Dates", "weight": "Bolder", "size": "Medium"},
             {"type": "TextBlock", "text": f"You chose {preferred_count} shifts. Please rank at least {min_required} dates.", "wrap": True},
@@ -181,10 +181,9 @@ class Step2PreferencesCommand(Command):
                 "body": form_body,
                 "actions": [
                     {
-                        "type": "Action.Submit", 
-                        "title": "✅ Submit Preferences", 
-                        # FIXED: Using the strict "command" keyword
-                        "data": {"command": "save_preferences", "target_month": target_month_str, "preferred_count": preferred_count}
+                        "type": "Action.Submit",
+                        "title": "✅ Submit Preferences",
+                        "data": {"callback_keyword": "save_preferences", "target_month": target_month_str, "preferred_count": preferred_count}
                     }
                 ]
             }
@@ -195,21 +194,23 @@ class Step2PreferencesCommand(Command):
         return response
 
 # ==========================================
-# COMMAND: Save Preferences (Placeholder)
+# COMMAND: Save Preferences
 # ==========================================
 class SavePreferencesCommand(Command):
     def __init__(self):
         super().__init__(command_keyword="save_preferences", help_message="Save to DB.", card=None)
+        self.card_callback_keyword = "save_preferences"
 
     def execute(self, message, attachment_actions, activity):
         return "✅ **Success!** Your preferences have been saved to the database. Thank you!"
 
 # ==========================================
-# COMMAND: Opt Out (Placeholder)
+# COMMAND: Opt Out
 # ==========================================
 class OptOutCommand(Command):
     def __init__(self):
         super().__init__(command_keyword="opt_out_preferences", help_message="Opt out of shifts.", card=None)
+        self.card_callback_keyword = "opt_out_preferences"
 
     def execute(self, message, attachment_actions, activity):
         return "🏖️ **Opt-Out Confirmed:** You have been marked as unavailable for next month."
