@@ -645,8 +645,6 @@ def manage_availability():
                     team_id=team_id, target_month=target_month_key,
                     entity_type="preferences", entity_id=eng_id,
                     error_message=str(e)
-                    conn.commit()
-                    
                 )
                 conn.commit()
 
