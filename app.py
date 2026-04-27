@@ -343,8 +343,8 @@ def broadcast_preferences():
     try:
         result = send_preference_broadcast(team_id, year, month)
         flash(f"Broadcast sent. Total={result['total']}, Sent={result['sent']}, Failed={result['failed']}", "success")
-    except Exception as e:
-        flash(f"Broadcast failed: {e}", "error")
+    except Exception as ex:
+        flash(f"Broadcast failed: {ex}", "error")
 
     return redirect(url_for("dashboard", year=year, month=month))
 
@@ -363,8 +363,8 @@ def publish_roster():
     try:
         result = publish_roster_for_month(team_id, year, month)
         flash(f"Roster published. Total={result['total']}, Sent={result['sent']}, Failed={result['failed']}", "success")
-    except Exception as e:
-        flash(f"Publish failed: {e}", "error")
+    except Exception as ex:
+        flash(f"Publish failed: {ex}", "error")
 
     return redirect(url_for("dashboard", year=year, month=month))
 
@@ -399,9 +399,9 @@ def manual_override():
             """, (shift_date, team_id, engineer_id))
             flash("Engineer removed from shift.", "success")
         conn.commit()
-    except Exception as e:
+    except Exceptionx as ex:
         conn.rollback()
-        flash(f"Database error: {e}", "error")
+        flash(f"Database error: {ex}", "error")
     finally:
         cur.close()
         conn.close()
@@ -434,9 +434,9 @@ def move_shift():
         """, (new_date, team_id, new_eng_id))
         conn.commit()
         return jsonify({"success": True})
-    except Exception as e:
+    except Exception as ex:
         conn.rollback()
-        return jsonify({"success": False, "message": str(e)}), 500
+        return jsonify({"success": False, "message": str(ex)}), 500
     finally:
         cur.close()
         conn.close()
