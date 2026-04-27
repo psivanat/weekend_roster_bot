@@ -1,4 +1,5 @@
 import os
+import requests
 from datetime import datetime
 import calendar
 import io
@@ -147,6 +148,76 @@ def quick_switch_team():
     team_id = int(request.form.get('team_id'))
     session['active_team_id'] = team_id
     return redirect(request.referrer or url_for('dashboard'))
+
+# ==========================================
+# WEBEX BOT INTEGRATION
+# ==========================================
+
+# Cisco Corporate Proxy (Required for outgoing API calls from the server)
+cisco_proxies = {
+    "http": "http://proxy-wsa.esl.cisco.com:80",
+    "https": "http://proxy-wsa.esl.cisco.com:80"
+}
+
+@app.route('/api/webex/webhook', methods=['POST'])
+def webex_webhook():
+    data = request.json
+    
+    # 1. Ignore messages sent by the bot itself (prevents infinite loops)
+    bot_email = os.getenv('WEBEX_BOT_EMAIL')
+    sender_email = data.get('data', {}).get('personEmail')
+    if sender_email == bot_email:
+        return jsonify({'status': 'ignored'}), 200
+        
+    # 2. Extract IDs
+    message_id = data.get('data', {}).get('id')
+    room_id = data.get('data', {}).get('roomId')
+    
+    if not message_id:
+        return jsonify({'status': 'no message id'}), 400
+        
+    # 3. Webex webhooks don't include the message text for security. 
+    # We must fetch the text using the message_id.
+    token = os.getenv('WEBEX_BOT_TOKEN')
+    headers = {'Authorization': f'Bearer {token}'}
+    
+    msg_resp = requests.get(
+        f"https://webexapis.com/v1/messages/{message_id}", 
+        headers=headers, 
+        proxies=cisco_proxies # Use proxies for Cisco network
+    )
+    
+    if msg_resp.status_code == 200:
+        # Clean up the message text
+        message_text = msg_resp.json().get('text', '').strip().lower()
+        
+        # 4. Command Routing Logic
+        reply_text = "I didn't understand that command. Try typing **help**."
+        
+        if "help" in message_text:
+            reply_text = (
+                "🤖 **Weekend Roster Bot**\n\n"
+                "Available commands:\n"
+                "- `help`: Show this menu\n"
+                "- `roster`: Show who is working this weekend (Coming soon!)\n"
+                "- `status`: Check if the bot is online"
+            )
+        elif "status" in message_text:
+            reply_text = "✅ Roster Bot is online and connected to the database!"
+            
+        # 5. Send the reply back to the Webex Room
+        payload = {
+            'roomId': room_id, 
+            'markdown': reply_text
+        }
+        requests.post(
+            "https://webexapis.com/v1/messages", 
+            headers=headers, 
+            json=payload, 
+            proxies=cisco_proxies
+        )
+        
+    return jsonify({'status': 'success'}), 200
 
 # ==========================================
 # ROUTES: CORE APPLICATION
