@@ -609,7 +609,8 @@ def manage_availability():
                                 team_id=team_id, target_month=target_month_key,
                                 entity_type="preferences", entity_id=eng_id,
                                 details={"preferences_raw": prefs, "saved_dates": dates, "preferred_count": preferred_count}
-                            )                         
+                            )
+                            conn.commit()                         
                             flash("Preferences updated.", "success")
 
                     else:
@@ -622,6 +623,7 @@ def manage_availability():
                             team_id=team_id, target_month=target_month_key,
                             entity_type="preferences", entity_id=eng_id
                         )
+                        conn.commit()
                         flash("Preferences cleared.", "success")
 
                 elif action == "add_leave":
@@ -643,12 +645,14 @@ def manage_availability():
                     team_id=team_id, target_month=target_month_key,
                     entity_type="preferences", entity_id=eng_id,
                     error_message=str(e)
+                    conn.commit()
+                    
                 )
                 conn.commit()
 
-            except Exception as e:
+            except Exception as ex:
                 conn.rollback()
-                flash(f"Save failed: {e}", "error")
+                flash(f"Save failed: {ex}", "error")
 
         # Engineers for forms
         cur.execute("""
