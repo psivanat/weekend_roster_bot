@@ -1,5 +1,4 @@
 import os
-import calendar
 from datetime import datetime
 import psycopg2
 from dotenv import load_dotenv
@@ -19,8 +18,10 @@ PROXIES = {
     "https": "http://proxy-wsa.esl.cisco.com:80"
 }
 
+
 def get_db_connection():
     return psycopg2.connect(**DB_PARAMS)
+
 
 def get_webex_client():
     token = os.getenv("WEBEX_BOT_TOKEN")
@@ -28,7 +29,27 @@ def get_webex_client():
         raise ValueError("WEBEX_BOT_TOKEN missing in .env")
     return WebexAPI(access_token=token, proxies=PROXIES)
 
-def build_preference_card(month_display):
+
+def get_team_name(team_id: int) -> str:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM teams WHERE id = %s", (team_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row[0] if row else f"Team {team_id}"
+
+
+def validate_month_not_past(year: int, month: int):
+    now = datetime.now()
+    req = year * 100 + month
+    cur = now.year * 100 + now.month
+    if req < cur:
+        raise ValueError("Cannot send preference request for a past month.")
+
+
+def build_preference_card(team_name: str, month_display: str, target_month: str):
+    title = f"📅 {team_name} — Preferences for {month_display}"
     return {
         "contentType": "application/vnd.microsoft.card.adaptive",
         "content": {
@@ -36,7 +57,7 @@ def build_preference_card(month_display):
             "type": "AdaptiveCard",
             "version": "1.2",
             "body": [
-                {"type": "TextBlock", "text": f"📅 Preferences for {month_display}", "weight": "Bolder", "size": "Medium"},
+                {"type": "TextBlock", "text": title, "weight": "Bolder", "size": "Medium"},
                 {"type": "TextBlock", "text": "Please submit your weekend shift preferences.", "wrap": True},
                 {
                     "type": "Input.ChoiceSet",
@@ -52,24 +73,45 @@ def build_preference_card(month_display):
                 }
             ],
             "actions": [
-                {"type": "Action.Submit", "title": "Next ➡️", "data": {"callback_keyword": "step2_preferences"}},
-                {"type": "Action.Submit", "title": "🏖️ Opt-Out (Unavailable)", "data": {"callback_keyword": "opt_out_preferences"}}
+                {
+                    "type": "Action.Submit",
+                    "title": "Next ➡️",
+                    "data": {
+                        "callback_keyword": "step2_preferences",
+                        "target_month": target_month
+                    }
+                },
+                {
+                    "type": "Action.Submit",
+                    "title": "🏖️ Opt-Out (Unavailable)",
+                    "data": {
+                        "callback_keyword": "opt_out_preferences",
+                        "target_month": target_month
+                    }
+                }
             ]
         }
     }
 
+
 def send_preference_broadcast(team_id: int, year: int, month: int):
+    validate_month_not_past(year, month)
+
     api = get_webex_client()
     conn = get_db_connection()
     cur = conn.cursor()
 
+    team_name = get_team_name(team_id)
     month_display = datetime(year, month, 1).strftime("%B %Y")
-    card = build_preference_card(month_display)
+    target_month = f"{year}-{month:02d}"
+    card = build_preference_card(team_name, month_display, target_month)
 
     cur.execute("""
         SELECT name, webex_email
         FROM engineers
-        WHERE team_id = %s AND is_active = TRUE AND webex_email IS NOT NULL
+        WHERE team_id = %s
+          AND is_active = TRUE
+          AND webex_email IS NOT NULL
         ORDER BY name
     """, (team_id,))
     engineers = cur.fetchall()
@@ -79,7 +121,7 @@ def send_preference_broadcast(team_id: int, year: int, month: int):
         try:
             api.messages.create(
                 toPersonEmail=email,
-                text=f"Roster preference request for {month_display}",
+                text=f"{team_name}: roster preference request for {month_display}",
                 attachments=[card]
             )
             sent += 1
@@ -88,20 +130,24 @@ def send_preference_broadcast(team_id: int, year: int, month: int):
 
     cur.close()
     conn.close()
-    return {"sent": sent, "failed": failed, "total": len(engineers)}
+    return {"sent": sent, "failed": failed, "total": len(engineers), "team": team_name, "month": month_display}
+
 
 def publish_roster_for_month(team_id: int, year: int, month: int):
     api = get_webex_client()
     conn = get_db_connection()
     cur = conn.cursor()
 
+    team_name = get_team_name(team_id)
     year_month = f"{year}-{month:02d}"
     month_display = datetime(year, month, 1).strftime("%B %Y")
 
     cur.execute("""
         SELECT e.id, e.name, e.webex_email
         FROM engineers e
-        WHERE e.team_id = %s AND e.is_active = TRUE AND e.webex_email IS NOT NULL
+        WHERE e.team_id = %s
+          AND e.is_active = TRUE
+          AND e.webex_email IS NOT NULL
         ORDER BY e.name
     """, (team_id,))
     engineers = cur.fetchall()
@@ -120,15 +166,15 @@ def publish_roster_for_month(team_id: int, year: int, month: int):
         dates = [r[0] for r in cur.fetchall()]
 
         if dates:
-            lines = "\n".join([f"- {d.strftime('%a, %d %b %Y')}" for d in dates])
+            lines = "\n".join([f"- {d.strftime('%d-%m-%Y (%A)')}" for d in dates])
             msg = (
-                f"✅ **Your published roster for {month_display}**\n\n"
+                f"✅ **{team_name} — Your published roster for {month_display}**\n\n"
                 f"{lines}\n\n"
                 f"Please plan accordingly."
             )
         else:
             msg = (
-                f"ℹ️ **Roster published for {month_display}**\n\n"
+                f"ℹ️ **{team_name} — Roster published for {month_display}**\n\n"
                 f"You have no assigned weekend shifts this month."
             )
 
@@ -140,4 +186,4 @@ def publish_roster_for_month(team_id: int, year: int, month: int):
 
     cur.close()
     conn.close()
-    return {"sent": sent, "failed": failed, "total": len(engineers)}
+    return {"sent": sent, "failed": failed, "total": len(engineers), "team": team_name, "month": month_display}

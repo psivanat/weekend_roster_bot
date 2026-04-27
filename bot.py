@@ -55,6 +55,18 @@ def get_engineer_by_email(email):
         print(f"DB error get_engineer_by_email: {e}")
         return None
 
+def get_team_name(team_id):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM teams WHERE id = %s", (team_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return row[0] if row else f"Team {team_id}"
+    except Exception:
+        return f"Team {team_id}"
+
 def get_team_admin_emails(team_id):
     try:
         conn = get_db_connection()
@@ -76,9 +88,6 @@ def get_team_admin_emails(team_id):
         return []
 
 def get_pending_engineers(target_month, team_id=None):
-    """
-    Pending = active engineers not submitted/opted_out for target_month
-    """
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -118,9 +127,6 @@ def get_pending_engineers(target_month, team_id=None):
         return []
 
 def check_all_complete_and_notify(target_month, team_id):
-    """
-    Team-scoped all-complete check.
-    """
     pending = get_pending_engineers(target_month, team_id=team_id)
     if len(pending) > 0:
         return
@@ -129,6 +135,7 @@ def check_all_complete_and_notify(target_month, team_id):
         print("bot_instance not initialized; cannot send all-complete notification")
         return
 
+    team_name = get_team_name(team_id)
     admin_emails = get_team_admin_emails(team_id)
     for admin_email in admin_emails:
         try:
@@ -136,7 +143,7 @@ def check_all_complete_and_notify(target_month, team_id):
                 toPersonEmail=admin_email,
                 markdown=(
                     f"🎉 **All Preferences Collected**\n\n"
-                    f"Team ID **{team_id}** has completed preference submission for **{target_month}**.\n"
+                    f"**{team_name}** has completed preference submission for **{target_month}**.\n"
                     f"You can now go to the dashboard and run roster generation."
                 )
             )
@@ -144,7 +151,8 @@ def check_all_complete_and_notify(target_month, team_id):
         except Exception as e:
             print(f"Error sending all-complete to {admin_email}: {e}")
 
-def build_step1_card(month_display):
+def build_step1_card(month_display, team_name=None):
+    title = f"📅 Preferences for {month_display}" if not team_name else f"📅 {team_name} — Preferences for {month_display}"
     return {
         "contentType": "application/vnd.microsoft.card.adaptive",
         "content": {
@@ -152,7 +160,7 @@ def build_step1_card(month_display):
             "type": "AdaptiveCard",
             "version": "1.2",
             "body": [
-                {"type": "TextBlock", "text": f"📅 Preferences for {month_display}", "weight": "Bolder", "size": "Medium"},
+                {"type": "TextBlock", "text": title, "weight": "Bolder", "size": "Medium"},
                 {"type": "TextBlock", "text": "How many weekend shifts do you prefer this month?", "wrap": True},
                 {
                     "type": "Input.ChoiceSet",
@@ -173,8 +181,6 @@ def build_step1_card(month_display):
             ]
         }
     }
-
-# ---------------- Commands ----------------
 
 class HelloCommand(Command):
     def __init__(self):
@@ -221,10 +227,14 @@ class Step1PreferencesCommand(Command):
         self.card_callback_keyword = "step1_preferences"
 
     def execute(self, message, attachment_actions, activity):
+        sender = activity.get("personEmail") or activity.get("actor", {}).get("emailAddress")
+        eng = get_engineer_by_email(sender)
+        team_name = get_team_name(eng[2]) if eng else None
+
         _, _, _, display = get_next_month_info()
         r = Response()
         r.text = "Preference Step 1"
-        r.attachments = build_step1_card(display)
+        r.attachments = build_step1_card(display, team_name=team_name)
         return r
 
 class Step2PreferencesCommand(Command):
@@ -241,7 +251,7 @@ class Step2PreferencesCommand(Command):
         weekends = get_weekend_dates(y, m)
         min_required = min(min_required, len(weekends))
 
-        choices = [{"title": d.strftime("%A, %b %d"), "value": d.strftime("%Y-%m-%d")} for d in weekends]
+        choices = [{"title": d.strftime("%A, %d-%m-%Y"), "value": d.strftime("%Y-%m-%d")} for d in weekends]
 
         body = [
             {"type": "TextBlock", "text": "📅 Step 2: Rank Date Preferences", "weight": "Bolder", "size": "Medium"},
@@ -310,7 +320,6 @@ class SavePreferencesCommand(Command):
             if k.startswith("priority_") and v:
                 selected.append(v)
 
-        # duplicate check
         seen = set()
         unique = []
         duplicates = []
@@ -344,10 +353,21 @@ class SavePreferencesCommand(Command):
             cur.close()
             conn.close()
 
-            # team-scoped completion check
             check_all_complete_and_notify(target_month, team_id)
 
-            return "✅ Preferences saved successfully."
+            # formatted confirmation list
+            formatted = []
+            for i, d in enumerate(unique, start=1):
+                dt = datetime.strptime(d, "%Y-%m-%d")
+                formatted.append(f"{i}. {dt.strftime('%d-%m-%Y (%A)')}")
+            date_list = "\n".join(formatted)
+
+            return (
+                f"✅ Preferences Saved Successfully!\n\n"
+                f"📅 Month: {target_month}\n"
+                f"🔢 Preferred Shifts: {preferred_count}\n"
+                f"📋 Your Priority Dates:\n{date_list}"
+            )
         except Exception as e:
             return f"❌ Database Error: {e}"
 
@@ -387,8 +407,6 @@ class OptOutCommand(Command):
         except Exception as e:
             return f"❌ Database Error: {e}"
 
-# ---------------- Scheduler jobs ----------------
-
 def nag_pending_engineers():
     print("[SCHEDULER] 48-hour pending reminder")
     _, _, target_month, display = get_next_month_info()
@@ -398,11 +416,12 @@ def nag_pending_engineers():
         print("bot_instance not initialized")
         return
 
-    card = build_step1_card(display)
-    for _, name, email, _ in pending:
+    for _, name, email, team_id in pending:
         if not email:
             continue
         try:
+            team_name = get_team_name(team_id)
+            card = build_step1_card(display, team_name=team_name)
             bot_instance.teams.messages.create(
                 toPersonEmail=email,
                 text="Reminder: Please submit your preferences.",
@@ -425,19 +444,18 @@ def send_admin_digest():
         print("No pending engineers")
         return
 
-    # group by team
     by_team = {}
     for _, name, _, team_id in pending:
         by_team.setdefault(team_id, []).append(name)
 
-    # send to admins per team
     for team_id, names in by_team.items():
         admins = get_team_admin_emails(team_id)
         if not admins:
             continue
 
+        team_name = get_team_name(team_id)
         msg = f"📋 **Daily Preference Digest — {display}**\n\n"
-        msg += f"Team ID {team_id} pending ({len(names)}):\n"
+        msg += f"**{team_name}** pending ({len(names)}):\n"
         for n in names:
             msg += f"- ⏳ {n}\n"
 
