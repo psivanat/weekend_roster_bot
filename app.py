@@ -419,7 +419,7 @@ def manage_engineers():
     return render_template("engineers.html", engineers=engineers)
 
 
-# ---------------- Availability (FIXED) ----------------
+# ---------------- Availability (Order-Preserving) ----------------
 
 @app.route("/availability", methods=["GET", "POST"])
 @login_required
@@ -428,7 +428,7 @@ def manage_availability():
     year = int(request.args.get("year", datetime.now().year))
     month = int(request.args.get("month", datetime.now().month))
 
-    # For current schema: preferences.target_month is VARCHAR/TEXT like "2026-04"
+    # preferences.target_month is VARCHAR/TEXT like "2026-05"
     target_month_key = f"{year}-{month:02d}"
     ym_str = target_month_key
     _, last_day = calendar.monthrange(year, month)
@@ -446,14 +446,20 @@ def manage_availability():
                     prefs = request.form.get("preferences", "").strip()
 
                     if prefs:
+                        # Preserve user-entered order; remove duplicates without sorting
                         raw_days = [x.strip() for x in prefs.split(",") if x.strip().isdigit()]
-                        days_int = sorted(set(int(d) for d in raw_days if 1 <= int(d) <= last_day))
+                        days_int = []
+                        seen = set()
+                        for x in raw_days:
+                            d = int(x)
+                            if 1 <= d <= last_day and d not in seen:
+                                seen.add(d)
+                                days_int.append(d)
 
                         if not days_int:
                             flash("No valid dates found for selected month.", "warning")
                         else:
-                            # priority_dates is date[]
-                            dates = [f"{year}-{month:02d}-{d:02d}" for d in days_int]
+                            dates = [f"{year}-{month:02d}-{d:02d}" for d in days_int]  # keep ranking order
                             preferred_count = max(1, len(dates) - 2)
 
                             cur.execute("""
@@ -506,7 +512,7 @@ def manage_availability():
         """, (team_id,))
         engineers = cur.fetchall()
 
-        # Submitted preferences table
+        # Submitted preferences table - preserve stored array order in display
         cur.execute("""
             SELECT
                 e.id AS engineer_id,
@@ -514,9 +520,9 @@ def manage_availability():
                 COALESCE(
                     array_to_string(
                         ARRAY(
-                            SELECT EXTRACT(DAY FROM d)::int::text
-                            FROM unnest(p.priority_dates) AS d
-                            ORDER BY d
+                            SELECT EXTRACT(DAY FROM u.d)::int::text
+                            FROM unnest(p.priority_dates) WITH ORDINALITY AS u(d, ord)
+                            ORDER BY u.ord
                         ),
                         ', '
                     ),
