@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block content %}
+<h3>Audit Logs</h3>
+
+<form method="get" class="row g-2 mb-3">
+  <div class="col-md-2">
+    <input name="target_month" class="form-control" placeholder="YYYY-MM" value="{{ filters.target_month }}">
+  </div>
+  <div class="col-md-2">
+    <select name="source" class="form-select">
+      <option value="">All Sources</option>
+      {% for s in sources %}
+      <option value="{{ s }}" {% if filters.source==s %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-md-3">
+    <select name="action" class="form-select">
+      <option value="">All Actions</option>
+      {% for a in actions %}
+      <option value="{{ a }}" {% if filters.action==a %}selected{% endif %}>{{ a }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-md-2">
+    <select name="status" class="form-select">
+      <option value="">All Status</option>
+      <option value="success" {% if filters.status=='success' %}selected{% endif %}>success</option>
+      <option value="failed" {% if filters.status=='failed' %}selected{% endif %}>failed</option>
+    </select>
+  </div>
+  <div class="col-md-1">
+    <input name="limit" type="number" class="form-control" value="{{ filters.limit }}">
+  </div>
+  <div class="col-md-2">
+    <button class="btn btn-primary w-100">Filter</button>
+  </div>
+</form>
+
+<div class="table-responsive">
+<table class="table table-sm table-striped align-middle">
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>Source</th>
+      <th>Action</th>
+      <th>Status</th>
+      <th>Actor</th>
+      <th>Month</th>
+      <th>Entity</th>
+      <th>Details</th>
+      <th>Error</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for l in logs %}
+    <tr>
+      <td>{{ l.event_time }}</td>
+      <td>{{ l.source }}</td>
+      <td>{{ l.action }}</td>
+      <td>
+        {% if l.status == 'success' %}
+          <span class="badge bg-success">success</span>
+        {% else %}
+          <span class="badge bg-danger">failed</span>
+        {% endif %}
+      </td>
+      <td>{{ l.actor_name or '-' }}</td>
+      <td>{{ l.target_month or '-' }}</td>
+      <td>{{ l.entity_type or '-' }} / {{ l.entity_id or '-' }}</td>
+      <td><small>{{ l.details }}</small></td>
+      <td><small class="text-danger">{{ l.error_message or '' }}</small></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

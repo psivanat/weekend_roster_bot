@@ -19,6 +19,7 @@
             
             {% if current_user.role in ['super_admin', 'team_admin'] %}
                 <a href="/settings" class="{% if request.path == '/settings' %}active{% endif %}">⚙️ Settings</a>
+                <a href="{{ url_for('audit_logs') }}">Audit Logs</a>
             {% endif %}
             
             {% if current_user.role == 'super_admin' %}

@@ -7,6 +7,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from webex_bot.webex_bot import WebexBot
 from webex_bot.models.command import Command
 from webex_bot.models.response import Response
+from audit_logger import audit_log
+reuse DB_PARAMS
 
 load_dotenv()
 
@@ -22,6 +24,35 @@ DB_PARAMS = {
     "user": os.getenv("DB_USER", "roster_bot"),
     "password": os.getenv("DB_PASS")
 }
+
+def bot_audit(action, status="success", team_id=None, target_month=None, entity_type=None,
+              entity_id=None, details=None, error_message=None, actor_name=None):
+    conn = None
+    try:
+        conn = get_db_connection()
+        # bot context has no Flask current_user; put actor in details
+        payload = details or {}
+        if actor_name:
+            payload["actor_name"] = actor_name
+
+        audit_log(
+            conn=conn,
+            source="webex_bot",
+            action=action,
+            status=status,
+            team_id=team_id,
+            target_month=target_month,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            details=payload,
+            error_message=error_message
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"[AUDIT] failed {action}: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 def get_db_connection():
     return psycopg2.connect(**DB_PARAMS)
@@ -191,7 +222,9 @@ class HelloCommand(Command):
         sender = activity.get("personEmail") or activity.get("actor", {}).get("emailAddress")
         eng = get_engineer_by_email(sender)
         if not eng:
+            bot_audit("BOT_HELLO_DENIED", status="failed", details={"email": sender}, error_message="not_registered")
             return "⛔ Access Denied: You are not registered as an active engineer."
+        bot_audit("BOT_HELLO_MENU", team_id=eng[2], entity_type="engineer", entity_id=eng[0], details={"email": sender})
 
         card = {
             "contentType": "application/vnd.microsoft.card.adaptive",
@@ -219,6 +252,7 @@ class StatusCommand(Command):
         super().__init__(command_keyword="status", help_message="Bot status", card=None)
 
     def execute(self, message, attachment_actions, activity):
+        bot_audit("BOT_STATUS_CHECK", details={"message": "status command"})
         return "✅ Roster Bot is online via WebSockets."
 
 class Step1PreferencesCommand(Command):
@@ -343,9 +377,17 @@ class SavePreferencesCommand(Command):
                 unique.append(d)
 
         if duplicates:
+            bot_audit("BOT_PREF_SUBMIT_FAILED", status="failed", team_id=team_id, target_month=target_month,
+                entity_type="preferences", entity_id=engineer_id,
+                details={"reason": "duplicate_dates", "selected": selected},
+                error_message="duplicate_dates")
             return "⚠️ Duplicate dates detected. Please resubmit without duplicates."
 
         if len(unique) < min_required:
+            bot_audit("BOT_PREF_SUBMIT_FAILED", status="failed", team_id=team_id, target_month=target_month,
+                entity_type="preferences", entity_id=engineer_id,
+                details={"reason": "min_not_met", "selected_count": len(unique), "min_required": min_required},
+                error_message="min_required_not_met")
             return f"⚠️ You selected {len(unique)} dates, minimum required is {min_required}."
 
         try:
@@ -364,7 +406,9 @@ class SavePreferencesCommand(Command):
             conn.commit()
             cur.close()
             conn.close()
-
+            bot_audit("BOT_PREF_SUBMIT", team_id=team_id, target_month=target_month,
+                entity_type="preferences", entity_id=engineer_id,
+                details={"preferred_count": preferred_count, "priority_dates": unique})
             check_all_complete_and_notify(target_month, team_id)
 
             # formatted confirmation list
@@ -381,6 +425,10 @@ class SavePreferencesCommand(Command):
                 f"📋 Your Priority Dates:\n{date_list}"
             )
         except Exception as e:
+            bot_audit("BOT_PREF_SUBMIT_FAILED", status="failed", team_id=team_id, target_month=target_month,
+                entity_type="preferences", entity_id=engineer_id,
+                details={"preferred_count": preferred_count},
+                error_message=str(e))
             return f"❌ Database Error: {e}"
 
 class OptOutCommand(Command):
@@ -411,12 +459,16 @@ class OptOutCommand(Command):
                     updated_at=CURRENT_TIMESTAMP
             """, (engineer_id, target_month))
             conn.commit()
+            bot_audit("BOT_PREF_OPTOUT", team_id=team_id, target_month=target_month,
+                entity_type="preferences", entity_id=engineer_id, details={"preferred_count": 0})
             cur.close()
             conn.close()
 
             check_all_complete_and_notify(target_month, team_id)
             return f"🏖️ Opt-out saved for {display}."
         except Exception as e:
+            bot_audit("BOT_PREF_OPTOUT_FAILED", status="failed", team_id=team_id, target_month=target_month,
+                entity_type="preferences", entity_id=engineer_id, error_message=str(e))
             return f"❌ Database Error: {e}"
 
 def nag_pending_engineers():

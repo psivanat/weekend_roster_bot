@@ -10,7 +10,7 @@ from flask_login import LoginManager, UserMixin, login_user, login_required, log
 from werkzeug.security import check_password_hash, generate_password_hash
 from dotenv import load_dotenv
 from psycopg2.extras import RealDictCursor
-
+from audit_logger import audit_log
 from scheduler_engine import generate_monthly_roster, get_weekend_dates
 from webex_notify import send_preference_broadcast, publish_roster_for_month
 
@@ -258,6 +258,76 @@ def generate_roster():
     flash(resp["message"], "success" if resp.get("success") else "error")
     return redirect(url_for("dashboard", year=year, month=month))
 
+@app.route("/audit-logs")
+@login_required
+def audit_logs():
+    team_id = session.get("active_team_id")
+    if not team_id:
+        flash("Select a team first.", "warning")
+        return redirect(url_for("dashboard"))
+
+    # filters
+    source = request.args.get("source", "").strip()
+    action = request.args.get("action", "").strip()
+    status = request.args.get("status", "").strip()
+    target_month = request.args.get("target_month", "").strip()
+    limit = min(int(request.args.get("limit", 100)), 500)
+
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    try:
+        q = """
+            SELECT id, event_time, source, action, status, actor_name, actor_role,
+                   team_id, target_month, entity_type, entity_id, details, error_message, ip_address
+            FROM audit_logs
+            WHERE team_id = %s
+        """
+        params = [team_id]
+
+        if source:
+            q += " AND source = %s"
+            params.append(source)
+        if action:
+            q += " AND action = %s"
+            params.append(action)
+        if status:
+            q += " AND status = %s"
+            params.append(status)
+        if target_month:
+            q += " AND target_month = %s"
+            params.append(target_month)
+
+        q += " ORDER BY event_time DESC LIMIT %s"
+        params.append(limit)
+
+        cur.execute(q, tuple(params))
+        logs = cur.fetchall()
+
+        # dropdown values
+        cur.execute("SELECT DISTINCT source FROM audit_logs WHERE team_id=%s ORDER BY source", (team_id,))
+        sources = [r["source"] for r in cur.fetchall()]
+
+        cur.execute("SELECT DISTINCT action FROM audit_logs WHERE team_id=%s ORDER BY action", (team_id,))
+        actions = [r["action"] for r in cur.fetchall()]
+
+    finally:
+        cur.close()
+        conn.close()
+
+    return render_template(
+        "audit_logs.html",
+        logs=logs,
+        sources=sources,
+        actions=actions,
+        filters={
+            "source": source,
+            "action": action,
+            "status": status,
+            "target_month": target_month,
+            "limit": limit
+        }
+    )
 
 @app.route("/admin/broadcast_preferences", methods=["POST"])
 @login_required
@@ -534,13 +604,24 @@ def manage_availability():
                                     priority_dates=EXCLUDED.priority_dates,
                                     updated_at=CURRENT_TIMESTAMP
                             """, (eng_id, target_month_key, preferred_count, dates))
-
+                            audit_log(
+                                conn, source="gui", action="UPDATE_PREFS", status="success",
+                                team_id=team_id, target_month=target_month_key,
+                                entity_type="preferences", entity_id=eng_id,
+                                details={"preferences_raw": prefs, "saved_dates": dates, "preferred_count": preferred_count}
+                            )                         
                             flash("Preferences updated.", "success")
+
                     else:
                         cur.execute("""
                             DELETE FROM preferences
                             WHERE engineer_id=%s AND target_month=%s
                         """, (eng_id, target_month_key))
+                        audit_log(
+                            conn, source="gui", action="CLEAR_PREFS", status="success",
+                            team_id=team_id, target_month=target_month_key,
+                            entity_type="preferences", entity_id=eng_id
+                        )
                         flash("Preferences cleared.", "success")
 
                 elif action == "add_leave":
@@ -550,13 +631,19 @@ def manage_availability():
                         VALUES (%s, %s)
                         ON CONFLICT DO NOTHING
                     """, (eng_id, leave_date))
+                    
                     flash("Leave blockout added.", "success")
 
                 elif action == "delete_leave":
                     leave_id = request.form.get("leave_id")
                     cur.execute("DELETE FROM leave_blockouts WHERE id=%s", (leave_id,))
                     flash("Leave blockout removed.", "success")
-
+                audit_log(
+                    conn, source="gui", action=action or "UNKNOWN_ACTION", status="failed",
+                    team_id=team_id, target_month=target_month_key,
+                    entity_type="preferences", entity_id=eng_id,
+                    error_message=str(e)
+                )
                 conn.commit()
 
             except Exception as e:

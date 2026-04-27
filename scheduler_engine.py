@@ -7,6 +7,7 @@ import random
 import itertools
 import time
 import copy
+from audit_logger import audit_log
 
 load_dotenv()
 DB_PARAMS = {
@@ -301,25 +302,78 @@ def get_smart_suggestion(engineers, availability, eng_max_shifts, eng_leaves, we
     return "💡 AI Suggestion: Try reducing required coverage in Team Settings, or increasing Max Shifts for engineers."
 
 def generate_monthly_roster(year, month, team_id, seed=42):
+    year_month = f"{year}-{month:02d}"
     engineers, availability, eng_max_shifts, eng_leaves, weekend_dates, settings = [], {}, {}, {}, [], {}
+    conn_audit = None
+
     try:
+        conn_audit = psycopg2.connect(**DB_PARAMS)
+
+        # START log
+        audit_log(
+            conn=conn_audit,
+            source="scheduler",
+            action="RUN_ALGORITHM_START",
+            status="success",
+            team_id=team_id,
+            target_month=year_month,
+            entity_type="roster_assignments",
+            entity_id=year_month,
+            details={"year": year, "month": month, "seed": seed}
+        )
+        conn_audit.commit()
+
         settings = fetch_team_settings(team_id)
         weekend_dates = get_weekend_dates(year, month)
         engineers, availability, eng_max_shifts, eng_leaves = fetch_data_from_db(year, month, weekend_dates, team_id)
         boundary_roster = fetch_boundary_roster(year, month, team_id)
 
         if not engineers:
-            return {"success": False, "message": "No active engineers found for this team."}
+            msg = "No active engineers found for this team."
+            audit_log(
+                conn=conn_audit,
+                source="scheduler",
+                action="RUN_ALGORITHM_FAILED",
+                status="failed",
+                team_id=team_id,
+                target_month=year_month,
+                entity_type="roster_assignments",
+                entity_id=year_month,
+                details={"reason": "no_eligible_engineers"},
+                error_message=msg
+            )
+            conn_audit.commit()
+            return {"success": False, "message": msg}
 
-        # Capacity Check (respects per-engineer max_shifts)
+        # Capacity Check
         total_needed = (
             len([d for d in weekend_dates if day_name(d) == "Saturday"]) * settings['sat_coverage'] +
             len([d for d in weekend_dates if day_name(d) == "Sunday"]) * settings['sun_coverage']
         )
         total_capacity = sum(eng_max_shifts.values())
+
         if total_capacity < total_needed:
             suggestion = get_smart_suggestion(engineers, availability, eng_max_shifts, eng_leaves, weekend_dates, settings)
-            return {"success": False, "message": f"Insufficient capacity. Needed: {total_needed}, Max Capacity: {total_capacity}.<br><br>{suggestion}"}
+            msg = f"Insufficient capacity. Needed: {total_needed}, Max Capacity: {total_capacity}.<br><br>{suggestion}"
+
+            audit_log(
+                conn=conn_audit,
+                source="scheduler",
+                action="RUN_ALGORITHM_FAILED",
+                status="failed",
+                team_id=team_id,
+                target_month=year_month,
+                entity_type="roster_assignments",
+                entity_id=year_month,
+                details={
+                    "reason": "insufficient_capacity",
+                    "total_needed": total_needed,
+                    "total_capacity": total_capacity
+                },
+                error_message="insufficient_capacity"
+            )
+            conn_audit.commit()
+            return {"success": False, "message": msg}
 
         roster, _ = draft_roster(
             availability, eng_max_shifts, eng_leaves,
@@ -327,8 +381,53 @@ def generate_monthly_roster(year, month, team_id, seed=42):
         )
         save_roster_to_db(roster, team_id)
 
+        total_assigned = sum(len(v) for v in roster.values())
+
+        # SUCCESS log
+        audit_log(
+            conn=conn_audit,
+            source="scheduler",
+            action="RUN_ALGORITHM_SUCCESS",
+            status="success",
+            team_id=team_id,
+            target_month=year_month,
+            entity_type="roster_assignments",
+            entity_id=year_month,
+            details={
+                "total_needed": total_needed,
+                "total_capacity": total_capacity,
+                "total_assigned": total_assigned,
+                "weekend_days": len(weekend_dates),
+                "eligible_engineers": len(engineers)
+            }
+        )
+        conn_audit.commit()
+
         return {"success": True, "message": "Roster successfully generated and saved!"}
 
     except Exception as e:
         suggestion = get_smart_suggestion(engineers, availability, eng_max_shifts, eng_leaves, weekend_dates, settings) if weekend_dates else ""
+
+        try:
+            if conn_audit:
+                audit_log(
+                    conn=conn_audit,
+                    source="scheduler",
+                    action="RUN_ALGORITHM_FAILED",
+                    status="failed",
+                    team_id=team_id,
+                    target_month=year_month,
+                    entity_type="roster_assignments",
+                    entity_id=year_month,
+                    details={"seed": seed},
+                    error_message=str(e)
+                )
+                conn_audit.commit()
+        except Exception:
+            pass
+
         return {"success": False, "message": f"Algorithm failed to find a valid combination: {e}<br><br>{suggestion}"}
+
+    finally:
+        if conn_audit:
+            conn_audit.close()
