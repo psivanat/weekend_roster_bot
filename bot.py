@@ -107,6 +107,69 @@ class Step1PreferencesCommand(Command):
         return response
 
 # -----------------------------------------
+# COMMAND: Status
+# -----------------------------------------
+class StatusCommand(Command):
+    def __init__(self):
+        super().__init__(
+            command_keyword="status",
+            help_message="Check if the bot is online.",
+            card=None
+        )
+
+    def execute(self, message, attachment_actions, activity):
+        return "✅ Roster Bot is online via WebSockets! The firewall has been bypassed. 🚀"
+
+# -----------------------------------------
+# COMMAND: Roster (Upcoming Shifts)
+# -----------------------------------------
+class RosterCommand(Command):
+    def __init__(self):
+        super().__init__(
+            command_keyword="roster",
+            help_message="Show who is working the upcoming weekend.",
+            card=None
+        )
+        
+    def execute(self, message, attachment_actions, activity):
+        try:
+            conn = psycopg2.connect(
+                host=os.getenv("DB_HOST", "localhost"),
+                database=os.getenv("DB_NAME", "roster_db"),
+                user=os.getenv("DB_USER", "postgres"),
+                password=os.getenv("DB_PASS", "")
+            )
+            cursor = conn.cursor()
+            query = """
+                SELECT r.shift_date, e.name 
+                FROM roster_assignments r
+                JOIN engineers e ON r.engineer_id = e.id
+                WHERE r.shift_date >= CURRENT_DATE
+                ORDER BY r.shift_date ASC
+                LIMIT 10;
+            """
+            cursor.execute(query)
+            records = cursor.fetchall()
+            cursor.close()
+            conn.close()
+            
+            if not records:
+                return "🗓️ There are no upcoming shifts scheduled in the database."
+                
+            response = "**🗓️ Upcoming Weekend Shifts:**\n\n"
+            current_date = None
+            for shift_date, engineer_name in records:
+                if shift_date != current_date:
+                    response += f"\n**{shift_date.strftime('%A, %b %d, %Y')}**\n"
+                    current_date = shift_date
+                response += f"- 👤 {engineer_name}\n"
+                
+            return response
+
+        except Exception as e:
+            return f"❌ **Database Error:** Could not fetch the roster.\n`{str(e)}`"
+
+# -----------------------------------------
 # COMMAND: Hi / Hello / Help (Interactive Menu)
 # -----------------------------------------
 class HelloCommand(Command):
