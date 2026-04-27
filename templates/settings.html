@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+    <h1>⚙️ Team Settings</h1>
+    <p class="subtitle">Customize the algorithm parameters for {{ active_team_name }}.</p>
+</div>
+
+<div class="card">
+    <form method="POST">
+        <div class="form-row">
+            <div style="flex: 1;">
+                <h3>Daily Coverage</h3>
+                <label>Engineers required on Saturday</label>
+                <input type="number" name="sat_coverage" value="{{ settings.sat_coverage }}" min="1" required>
+                
+                <label>Engineers required on Sunday</label>
+                <input type="number" name="sun_coverage" value="{{ settings.sun_coverage }}" min="1" required>
+            </div>
+            
+            <div style="flex: 1;">
+                <h3>Shift Timings</h3>
+                <label>Shift Start Time</label>
+                <input type="time" name="shift_start_time" value="{{ settings.shift_start_time }}" required>
+                
+                <label>Shift End Time</label>
+                <input type="time" name="shift_end_time" value="{{ settings.shift_end_time }}" required>
+            </div>
+            
+            <div style="flex: 1;">
+                <h3>Rules</h3>
+                <label>Minimum Preferences Required</label>
+                <input type="number" name="min_preferences" value="{{ settings.min_preferences }}" min="0" required>
+            </div>
+        </div>
+        <button type="submit" class="btn" style="margin-top: 20px;">💾 Save Settings</button>
+    </form>
+</div>
+{% endblock %}

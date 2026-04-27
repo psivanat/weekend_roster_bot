@@ -1,0 +1,40 @@
+# Environment Variables (Contains DB password - NEVER upload this!)
+.env
+
+# SSL Certificate Files (Contains private key - NEVER upload this!)
+*.key
+*.crt
+*.csr
+*.pem
+
+# Python Cache Files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual Environment
+venv/
+env/
+.venv/
+
+# Database files (if using SQLite as backup)
+*.db
+*.sqlite3
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Flask Session files
+flask_session/
+
+# Log files
+*.log

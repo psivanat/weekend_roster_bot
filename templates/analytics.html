@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card flex-between">
+    <div>
+        <h1>📈 Analytics</h1>
+        <p class="subtitle">Year-to-Date shift distribution.</p>
+    </div>
+    <form method="GET" class="form-row">
+        <select name="year" onchange="this.form.submit()">
+            {% for y in [2024, 2025, 2026, 2027] %}
+            <option value="{{ y }}" {% if y == selected_year %}selected{% endif %}>{{ y }}</option>
+            {% endfor %}
+        </select>
+    </form>
+</div>
+
+<div class="card">
+    <h3>Total Shifts Worked ({{ selected_year }})</h3>
+    <canvas id="shiftChart" height="100"></canvas>
+</div>
+
+<script>
+    const ctx = document.getElementById('shiftChart').getContext('2d');
+    new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: {{ labels | safe }},
+            datasets: [{
+                label: 'Total Shifts',
+                data: {{ data | safe }},
+                backgroundColor: '#C05A46',
+                borderRadius: 4
+            }]
+        },
+        options: {
+            scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } }
+        }
+    });
+</script>
+{% endblock %}

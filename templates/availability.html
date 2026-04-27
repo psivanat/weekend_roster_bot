@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card flex-between">
+    <div>
+        <h1>Manage Availability</h1>
+        <p class="subtitle">Input preferences or log approved leave blockouts.</p>
+    </div>
+    <form method="GET" class="form-row">
+        <select name="year" onchange="this.form.submit()">
+            {% for y in [2024, 2025, 2026, 2027] %}
+            <option value="{{ y }}" {% if y == selected_year %}selected{% endif %}>{{ y }}</option>
+            {% endfor %}
+        </select>
+        <select name="month" onchange="this.form.submit()">
+            {% for m in range(1, 13) %}
+            <option value="{{ m }}" {% if m == selected_month %}selected{% endif %}>Month {{ m }}</option>
+            {% endfor %}
+        </select>
+    </form>
+</div>
+
+<div class="form-row">
+    <div class="card" style="flex: 2;">
+        <h3>Submitted Preferences</h3>
+        <p style="font-size: 0.9rem; color: var(--text-muted);">Edit preferences directly in the table and click Save. Leave blank to clear.</p>
+        
+        <table>
+            <thead>
+                <tr>
+                    <th>Engineer</th>
+                    <th>Dates Selected (Comma Separated)</th>
+                    {% if current_user.role != 'viewer' %}<th>Action</th>{% endif %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in avail_data %}
+                <tr>
+                    <td><strong>{{ row.name }}</strong></td>
+                    
+                    {% if current_user.role != 'viewer' %}
+                    <form method="POST" style="margin: 0;">
+                        <input type="hidden" name="action" value="update_prefs">
+                        <!-- Uses the new engineer_id from your updated SQL query -->
+                        <input type="hidden" name="engineer_id" value="{{ row.engineer_id }}">
+                        <td>
+                            <input type="text" name="preferences" value="{{ row.preferences if row.preferences else '' }}" placeholder="e.g. 14, 15, 28" style="margin: 0; width: 100%;">
+                        </td>
+                        <td>
+                            <button type="submit" class="btn btn-outline" style="padding: 6px 12px;">Save</button>
+                        </td>
+                    </form>
+                    {% else %}
+                        <td colspan="2">{{ row.preferences if row.preferences else 'None submitted' }}</td>
+                    {% endif %}
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="card" style="flex: 1;">
+        <h3>Approved Leave (Blockouts)</h3>
+        <table>
+            <thead><tr><th>Engineer</th><th>Date</th>{% if current_user.role != 'viewer' %}<th></th>{% endif %}</tr></thead>
+            <tbody>
+                {% for l in leaves %}
+                <tr>
+                    <td>{{ l.name }}</td>
+                    <td>{{ l.block_date.strftime('%Y-%m-%d') }}</td>
+                    {% if current_user.role != 'viewer' %}
+                    <td>
+                        <form method="POST" style="margin:0;">
+                            <input type="hidden" name="action" value="delete_leave">
+                            <input type="hidden" name="leave_id" value="{{ l.id }}">
+                            <button type="submit" class="btn-outline" style="padding: 2px 8px; border:none; color: var(--danger); font-weight: bold;">X</button>
+                        </form>
+                    </td>
+                    {% endif %}
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        
+        {% if current_user.role != 'viewer' %}
+        <hr style="border: 0; border-top: 1px solid var(--border); margin: 20px 0;">
+        <h4>Add Blockout</h4>
+        <form method="POST">
+            <input type="hidden" name="action" value="add_leave">
+            <select name="engineer_id" required style="margin-bottom: 10px;">
+                {% for eng in engineers %}<option value="{{ eng.id }}">{{ eng.name }}</option>{% endfor %}
+            </select>
+            <input type="date" name="leave_date" required style="margin-bottom: 10px;">
+            <button type="submit" class="btn" style="width: 100%;">Add Leave</button>
+        </form>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

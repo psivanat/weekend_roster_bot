@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+    <h1>Team Engineers</h1>
+    <p class="subtitle">Manage your team members, individual shift limits, and roster access.</p>
+</div>
+
+{% if current_user.role != 'viewer' %}
+<div class="card">
+    <h3 style="margin-top: 0;">➕ Add New Engineer</h3>
+    <form method="POST" style="display: flex; gap: 15px; align-items: flex-end;">
+        <input type="hidden" name="action" value="add">
+        
+        <div style="flex: 2;">
+            <label style="font-size: 0.85rem; color: var(--text-muted); font-weight: bold;">Full Name</label>
+            <input type="text" name="name" placeholder="e.g. John Doe" required style="margin: 0;">
+        </div>
+        
+        <div style="flex: 2;">
+            <label style="font-size: 0.85rem; color: var(--text-muted); font-weight: bold;">Webex Email</label>
+            <input type="email" name="email" placeholder="john@company.com" required style="margin: 0;">
+        </div>
+        
+        <div style="flex: 1;">
+            <label style="font-size: 0.85rem; color: var(--text-muted); font-weight: bold;">Max Shifts Allowed</label>
+            <input type="number" name="max_shifts" value="3" min="1" required style="margin: 0; border: 2px solid #0052cc;">
+        </div>
+        
+        <div>
+            <button type="submit" class="btn" style="height: 42px; padding: 0 25px;">Add Engineer</button>
+        </div>
+    </form>
+</div>
+{% endif %}
+
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Webex Email</th>
+                <th>Max Shifts/Month</th>
+                <th>Status</th>
+                {% if current_user.role != 'viewer' %}<th>Actions</th>{% endif %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for eng in engineers %}
+            <tr>
+                <form method="POST">
+                    <input type="hidden" name="eng_id" value="{{ eng.id }}">
+                    <td><strong>{{ eng.name }}</strong></td>
+                    <td>{{ eng.webex_email }}</td>
+                    <td>
+                        {% if current_user.role != 'viewer' %}
+                        <input type="number" name="max_shifts" value="{{ eng.max_shifts }}" style="width: 80px; margin:0;">
+                        {% else %} {{ eng.max_shifts }} {% endif %}
+                    </td>
+                    <td>
+                        {% if current_user.role != 'viewer' %}
+                        <input type="checkbox" name="is_active" {% if eng.is_active %}checked{% endif %}> Active
+                        {% else %} {{ 'Active' if eng.is_active else 'Inactive' }} {% endif %}
+                    </td>
+                    {% if current_user.role != 'viewer' %}
+                    <td style="display: flex; gap: 8px;">
+                        <button type="submit" name="action" value="edit" class="btn btn-outline" style="padding: 5px 12px;">Save</button>
+                        <button type="submit" name="action" value="delete" class="btn" style="padding: 5px 12px; background-color: var(--danger);" onclick="return confirm('Are you sure? This deletes the engineer, their preferences, and their shift history forever!');">Delete</button>
+                    </td>
+                    {% endif %}
+                </form>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

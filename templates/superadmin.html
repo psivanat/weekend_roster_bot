@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+    <h1 style="color: var(--primary);">👑 Super Admin Console</h1>
+    <p class="subtitle">Global control over Teams and Users.</p>
+</div>
+
+<div class="form-row">
+    <!-- CREATE TEAM -->
+    <div class="card" style="flex: 1;">
+        <h3>Create New Team</h3>
+        <form method="POST">
+            <input type="hidden" name="action" value="create_team">
+            <input type="text" name="team_name" placeholder="Team Name" required>
+            <button type="submit" class="btn">Create Team</button>
+        </form>
+    </div>
+
+    <!-- MANAGE / DELETE TEAMS -->
+    <div class="card" style="flex: 1;">
+        <h3>Manage Teams</h3>
+        <table style="width: 100%;">
+            <tbody>
+                {% for team in all_teams %}
+                <tr>
+                    <td><strong>{{ team.name }}</strong></td>
+                    <td style="text-align: right;">
+                        <form method="POST" style="margin: 0;">
+                            <input type="hidden" name="action" value="delete_team">
+                            <input type="hidden" name="team_id" value="{{ team.id }}">
+                            <button type="submit" class="btn" style="padding: 5px 10px; background-color: var(--danger); font-size: 0.85rem;" onclick="return confirm('WARNING: This deletes the team, all its engineers, and all its rosters forever. Are you sure?');">Delete</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- CREATE USER -->
+<div class="card">
+    <h3>Create New User</h3>
+    <form method="POST" class="form-row" style="align-items: flex-start;">
+        <input type="hidden" name="action" value="create_user">
+        
+        <div style="flex: 1;">
+            <input type="text" name="username" placeholder="Username" required>
+            <input type="password" name="password" placeholder="Password" required>
+            <select name="role" required>
+                <option value="team_admin">Team Admin</option>
+                <option value="viewer">Read-Only Viewer</option>
+                <option value="super_admin">Super Admin</option>
+            </select>
+        </div>
+        
+        <div style="flex: 1; border: 1px solid var(--border); padding: 15px; border-radius: 6px;">
+            <p style="margin: 0 0 10px 0; font-size: 0.9rem; font-weight: bold;">Assign Teams (Not needed for Super Admin):</p>
+            <div style="max-height: 120px; overflow-y: auto;">
+                {% for team in all_teams %}
+                <label style="display: block; margin-bottom: 5px;">
+                    <input type="checkbox" name="team_ids" value="{{ team.id }}"> {{ team.name }}
+                </label>
+                {% endfor %}
+            </div>
+        </div>
+        
+        <div>
+            <button type="submit" class="btn" style="height: 100%;">Create User</button>
+        </div>
+    </form>
+</div>
+
+<!-- MANAGE USERS -->
+<div class="card">
+    <h3>Manage Existing Users</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Username</th>
+                <th>Role</th>
+                <th>Assigned Teams</th>
+                <th>Reset Password</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for u in all_users %}
+            <tr>
+                <form method="POST">
+                    <input type="hidden" name="action" value="update_user">
+                    <input type="hidden" name="user_id" value="{{ u.id }}">
+                    
+                    <td><strong>{{ u.username }}</strong></td>
+                    <td>{{ u.role }}</td>
+                    
+                    <td>
+                        {% if u.role == 'super_admin' %}
+                            <em>All Teams</em>
+                        {% else %}
+                            <div style="max-height: 80px; overflow-y: auto; font-size: 0.85rem;">
+                                {% for team in all_teams %}
+                                <label style="display: block;">
+                                    <input type="checkbox" name="team_ids" value="{{ team.id }}" {% if team.id in u.team_ids %}checked{% endif %}> {{ team.name }}
+                                </label>
+                                {% endfor %}
+                            </div>
+                        {% endif %}
+                    </td>
+                    
+                    <td><input type="password" name="new_password" placeholder="New Password..." style="width: 150px; margin: 0;"></td>
+                    <td><input type="checkbox" name="is_active" {% if u.is_active %}checked{% endif %}> Active</td>
+                    <td><button type="submit" class="btn btn-outline" style="padding: 5px 10px;">Update</button></td>
+                </form>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card card-header">
+    <div>
+        <p class="subtitle">Team Workspace</p>
+        <h1 style="font-size: 2.2rem;">Month of {{ month_name }} {{ year }}</h1>
+    </div>
+    <div style="display: flex; gap: 12px;">
+        <form action="/generate" method="POST" style="margin: 0;">
+            <button type="submit" class="btn btn-outline">Run Algorithm</button>
+        </form>
+        <button class="btn">Publish to Webex</button>
+    </div>
+</div>
+
+<div class="card" style="padding: 0; overflow: hidden;">
+    <table class="roster-table">
+        <thead>
+            <tr>
+                <th style="text-align: left; padding-left: 30px;">Engineer</th>
+                {% for date in dates %}
+                <th>{{ date.strftime('%a, %b %d') }}</th>
+                {% endfor %}
+                <th style="padding-right: 30px;">Total Shifts</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for eng in engineers %}
+            <tr>
+                <td class="eng-name" style="padding-left: 30px;">{{ eng.name }}</td>
+                
+                {% set total_shifts = namespace(value=0) %}
+                
+                {% for date in dates %}
+                    {% set date_str = date.strftime('%Y-%m-%d') %}
+                    {% if date_str in matrix and eng.name in matrix[date_str] %}
+                        <td><div class="cell-working">Working</div></td>
+                        {% set total_shifts.value = total_shifts.value + 1 %}
+                    {% else %}
+                        <td class="cell-empty">-</td>
+                    {% endif %}
+                {% endfor %}
+                
+                <td style="font-weight: 800; padding-right: 30px;">{{ total_shifts.value }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

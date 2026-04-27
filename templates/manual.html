@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+    <h1>Application Manual</h1>
+    <p class="subtitle">How the ShiftSync Algorithm Works</p>
+    
+    <h3>1. Priority Logic</h3>
+    <p>The algorithm assigns shifts based on a strict priority system:</p>
+    <ul>
+        <li><strong>Fairness First:</strong> It ensures no single engineer works significantly more shifts than anyone else.</li>
+        <li><strong>Sat/Sun Balance:</strong> If an engineer works 2 or more shifts, it attempts to give them at least one Saturday and one Sunday.</li>
+        <li><strong>7-Day Rule:</strong> It actively avoids scheduling an engineer on a Sunday and the immediately following Saturday.</li>
+        <li><strong>Preferences:</strong> It tries to assign engineers to the dates they ranked highest in their availability list.</li>
+    </ul>
+
+    <h3>2. Leave Blockouts</h3>
+    <p>If an engineer is added to the <strong>Leave Blockouts</strong> list on the Availability page, the algorithm will absolutely ignore them for that date, even if they accidentally submitted it in their preferences.</p>
+</div>
+{% endblock %}

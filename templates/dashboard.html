@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+{% block content %}
+{% if not active_team_id %}
+<div class="card">
+    <h2>No Team Selected</h2>
+    <p>Please ask an administrator to assign you to a team.</p>
+</div>
+{% else %}
+<div class="card flex-between">
+    <div>
+        <p class="subtitle">Roster Workspace</p>
+        <h1>{{ month_name }} {{ selected_year }}</h1>
+    </div>
+    <div style="display: flex; gap: 10px;">
+        <form method="GET" action="/" class="form-row" style="margin: 0;">
+            <select name="year" onchange="this.form.submit()">
+                {% for y in [2024, 2025, 2026, 2027] %}
+                <option value="{{ y }}" {% if y == selected_year %}selected{% endif %}>{{ y }}</option>
+                {% endfor %}
+            </select>
+            <select name="month" onchange="this.form.submit()">
+                {% for m in range(1, 13) %}
+                <option value="{{ m }}" {% if m == selected_month %}selected{% endif %}>Month {{ m }}</option>
+                {% endfor %}
+            </select>
+        </form>
+        <a href="/export_csv?year={{ selected_year }}&month={{ selected_month }}" class="btn btn-outline">📥 Export CSV</a>
+    </div>
+</div>
+
+{% if current_user.role != 'viewer' %}
+<div class="card flex-between" style="background-color: #fff9f8;">
+    <div>
+        <h3 style="margin: 0;">Algorithm Generator</h3>
+        <p style="margin: 5px 0 0 0; font-size: 0.9rem; color: var(--text-muted);">Automatically assign shifts based on preferences and rules.</p>
+    </div>
+    <form method="POST" action="/generate" style="margin: 0;">
+        <input type="hidden" name="year" value="{{ selected_year }}">
+        <input type="hidden" name="month" value="{{ selected_month }}">
+        <button type="submit" class="btn">🚀 Run Algorithm</button>
+    </form>
+</div>
+{% endif %}
+
+<div class="card" style="padding: 0; overflow-x: auto;">
+    {% if current_user.role != 'viewer' %}
+    <div style="padding: 15px 20px; background-color: #f8f9fa; border-bottom: 1px solid var(--border); font-size: 0.9rem; color: var(--text-muted);">
+        💡 <strong>Pro Tip:</strong> You can click and drag a "Working" badge to move a shift to a different day or a different engineer!
+    </div>
+    {% endif %}
+    
+    <table class="matrix-table">
+        <thead>
+            <tr>
+                <th>Engineer</th>
+                {% for date in dates %}
+                <th>{{ date.strftime('%d %b') }}<br><small>{{ date.strftime('%a') }}</small></th>
+                {% endfor %}
+                <th>Total</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for eng in engineers %}
+            <tr>
+                <td>{{ eng.name }}</td>
+                {% set total = namespace(value=0) %}
+                
+                {% for date in dates %}
+                    {% set d_str = date.strftime('%Y-%m-%d') %}
+                    
+                    <!-- DROPZONE: Every cell is a dropzone -->
+                    <td class="dropzone" data-eng-id="{{ eng.id }}" data-date="{{ d_str }}" style="transition: background-color 0.2s;">
+                        
+                        {% if eng.id in matrix[d_str] %}
+                            <!-- DRAGGABLE ITEM -->
+                            <div class="cell-working draggable-shift" 
+                                 {% if current_user.role != 'viewer' %}draggable="true"{% endif %} 
+                                 data-eng-id="{{ eng.id }}" 
+                                 data-date="{{ d_str }}"
+                                 style="{% if current_user.role != 'viewer' %}cursor: grab;{% endif %}">
+                                Working
+                            </div>
+                            {% set total.value = total.value + 1 %}
+                        {% else %}
+                            <div class="cell-empty">-</div>
+                        {% endif %}
+                        
+                    </td>
+                {% endfor %}
+                <td style="font-weight: bold;">{{ total.value }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- DRAG AND DROP JAVASCRIPT -->
+{% if current_user.role != 'viewer' %}
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const draggables = document.querySelectorAll('.draggable-shift');
+        const dropzones = document.querySelectorAll('.dropzone');
+
+        draggables.forEach(draggable => {
+            draggable.addEventListener('dragstart', (e) => {
+                // Store the old engineer ID and date
+                const payload = {
+                    old_eng_id: draggable.getAttribute('data-eng-id'),
+                    old_date: draggable.getAttribute('data-date')
+                };
+                e.dataTransfer.setData('application/json', JSON.stringify(payload));
+                setTimeout(() => draggable.style.opacity = '0.4', 0);
+            });
+
+            draggable.addEventListener('dragend', () => {
+                draggable.style.opacity = '1';
+            });
+        });
+
+        dropzones.forEach(zone => {
+            zone.addEventListener('dragover', (e) => {
+                e.preventDefault(); // Required to allow dropping
+                zone.style.backgroundColor = '#f0f0f0'; // Highlight cell
+            });
+
+            zone.addEventListener('dragleave', () => {
+                zone.style.backgroundColor = ''; // Remove highlight
+            });
+
+            zone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                zone.style.backgroundColor = '';
+
+                const data = JSON.parse(e.dataTransfer.getData('application/json'));
+                const new_eng_id = zone.getAttribute('data-eng-id');
+                const new_date = zone.getAttribute('data-date');
+
+                // If dropped in the exact same cell, do nothing
+                if (data.old_eng_id === new_eng_id && data.old_date === new_date) return;
+
+                // Call the Flask API to swap the shift
+                fetch('/api/move_shift', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        old_eng_id: data.old_eng_id,
+                        old_date: data.old_date,
+                        new_eng_id: new_eng_id,
+                        new_date: new_date
+                    })
+                })
+                .then(response => response.json())
+                .then(result => {
+                    if (result.success) {
+                        window.location.reload(); // Reload to show updated matrix
+                    } else {
+                        alert("Failed to move shift: " + result.message);
+                    }
+                });
+            });
+        });
+    });
+</script>
+{% endif %}
+
+{% endif %}
+{% endblock %}
