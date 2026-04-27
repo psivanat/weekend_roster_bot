@@ -428,9 +428,8 @@ def manage_availability():
     year = int(request.args.get("year", datetime.now().year))
     month = int(request.args.get("month", datetime.now().month))
 
-    # Canonical month values
-    target_month_date = date(year, month, 1)          # for preferences.target_month (DATE)
-    ym_str = target_month_date.strftime("%Y-%m")      # for TO_CHAR comparisons/UI
+    target_month_date = date(year, month, 1)
+    ym_str = target_month_date.strftime("%Y-%m")
     _, last_day = calendar.monthrange(year, month)
 
     conn = get_db_connection()
@@ -438,96 +437,73 @@ def manage_availability():
 
     try:
         if request.method == "POST" and current_user.role != "viewer":
-            action = request.form.get("action")
-            eng_id = request.form.get("engineer_id")
+            try:
+                action = request.form.get("action")
+                eng_id = request.form.get("engineer_id")
 
-            if action == "update_prefs":
-                # input format: "14, 15, 28"
-                prefs = request.form.get("preferences", "").strip()
+                if action == "update_prefs":
+                    prefs = request.form.get("preferences", "").strip()
 
-                if prefs:
-                    raw_days = [x.strip() for x in prefs.split(",") if x.strip().isdigit()]
-                    days_int = sorted(set(int(d) for d in raw_days if 1 <= int(d) <= last_day))
+                    if prefs:
+                        raw_days = [x.strip() for x in prefs.split(",") if x.strip().isdigit()]
+                        days_int = sorted(set(int(d) for d in raw_days if 1 <= int(d) <= last_day))
 
-                    if not days_int:
-                        flash("No valid dates found for selected month.", "warning")
+                        if not days_int:
+                            flash("No valid dates found for selected month.", "warning")
+                        else:
+                            dates = [date(year, month, d) for d in days_int]
+                            preferred_count = max(1, len(dates) - 2)
+
+                            cur.execute("""
+                                INSERT INTO preferences (
+                                    engineer_id, target_month, status, preferred_count, priority_dates, updated_at
+                                )
+                                VALUES (%s, %s, 'submitted', %s, %s::date[], CURRENT_TIMESTAMP)
+                                ON CONFLICT (engineer_id, target_month)
+                                DO UPDATE SET
+                                    status='submitted',
+                                    preferred_count=EXCLUDED.preferred_count,
+                                    priority_dates=EXCLUDED.priority_dates,
+                                    updated_at=CURRENT_TIMESTAMP
+                            """, (eng_id, target_month_date, preferred_count, dates))
+
+                            flash("Preferences updated.", "success")
                     else:
-                        dates = [date(year, month, d) for d in days_int]
-                        preferred_count = max(1, len(dates) - 2)
+                        cur.execute("""
+                            DELETE FROM preferences
+                            WHERE engineer_id=%s AND target_month=%s
+                        """, (eng_id, target_month_date))
+                        flash("Preferences cleared.", "success")
 
-                        cur.execute(
-                            """
-                            INSERT INTO preferences (
-                                engineer_id, target_month, status, preferred_count, priority_dates, updated_at
-                            )
-                            VALUES (%s, %s, 'submitted', %s, %s::date[], CURRENT_TIMESTAMP)
-                            ON CONFLICT (engineer_id, target_month)
-                            DO UPDATE SET
-                                status = 'submitted',
-                                preferred_count = EXCLUDED.preferred_count,
-                                priority_dates = EXCLUDED.priority_dates,
-                                updated_at = CURRENT_TIMESTAMP
-                            """,
-                            (eng_id, target_month_date, preferred_count, dates),
-                        )
+                elif action == "add_leave":
+                    leave_date = request.form.get("leave_date")
+                    cur.execute("""
+                        INSERT INTO leave_blockouts (engineer_id, block_date)
+                        VALUES (%s, %s)
+                        ON CONFLICT DO NOTHING
+                    """, (eng_id, leave_date))
+                    flash("Leave blockout added.", "success")
 
-                        # Optional debug verification (remove later)
-                        cur.execute(
-                            """
-                            SELECT priority_dates
-                            FROM preferences
-                            WHERE engineer_id = %s AND target_month = %s
-                            """,
-                            (eng_id, target_month_date),
-                        )
-                        saved = cur.fetchone()
-                        print("DEBUG saved priority_dates:", saved)
+                elif action == "delete_leave":
+                    leave_id = request.form.get("leave_id")
+                    cur.execute("DELETE FROM leave_blockouts WHERE id=%s", (leave_id,))
+                    flash("Leave blockout removed.", "success")
 
-                        flash("Preferences updated.", "success")
-                else:
-                    cur.execute(
-                        """
-                        DELETE FROM preferences
-                        WHERE engineer_id = %s AND target_month = %s
-                        """,
-                        (eng_id, target_month_date),
-                    )
-                    flash("Preferences cleared.", "success")
+                conn.commit()
 
-            elif action == "add_leave":
-                leave_date = request.form.get("leave_date")
-                cur.execute(
-                    """
-                    INSERT INTO leave_blockouts (engineer_id, block_date)
-                    VALUES (%s, %s)
-                    ON CONFLICT DO NOTHING
-                    """,
-                    (eng_id, leave_date),
-                )
-                flash("Leave blockout added.", "success")
+            except Exception as e:
+                conn.rollback()
+                flash(f"Save failed: {e}", "error")
 
-            elif action == "delete_leave":
-                leave_id = request.form.get("leave_id")
-                cur.execute("DELETE FROM leave_blockouts WHERE id=%s", (leave_id,))
-                flash("Leave blockout removed.", "success")
-
-            conn.commit()
-
-        # For dropdowns/forms
-        cur.execute(
-            """
+        cur.execute("""
             SELECT id, name
             FROM engineers
-            WHERE team_id = %s AND is_active = TRUE
+            WHERE team_id=%s AND is_active=TRUE
             ORDER BY name
-            """,
-            (team_id,),
-        )
+        """, (team_id,))
         engineers = cur.fetchall()
 
-        # Submitted preferences table
-        cur.execute(
-            """
+        cur.execute("""
             SELECT
                 e.id AS engineer_id,
                 e.name,
@@ -547,24 +523,18 @@ def manage_availability():
                 ON e.id = p.engineer_id
                AND p.target_month = %s
                AND p.status = 'submitted'
-            WHERE e.team_id = %s AND e.is_active = TRUE
+            WHERE e.team_id=%s AND e.is_active=TRUE
             ORDER BY e.name
-            """,
-            (target_month_date, team_id),
-        )
+        """, (target_month_date, team_id))
         avail_data = cur.fetchall()
 
-        # Leave blockouts
-        cur.execute(
-            """
+        cur.execute("""
             SELECT l.id, e.name, l.block_date
             FROM leave_blockouts l
             JOIN engineers e ON l.engineer_id = e.id
-            WHERE e.team_id = %s AND TO_CHAR(l.block_date, 'YYYY-MM') = %s
+            WHERE e.team_id=%s AND TO_CHAR(l.block_date, 'YYYY-MM')=%s
             ORDER BY l.block_date
-            """,
-            (team_id, ym_str),
-        )
+        """, (team_id, ym_str))
         leaves = cur.fetchall()
 
     finally:
