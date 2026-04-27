@@ -428,8 +428,9 @@ def manage_availability():
     year = int(request.args.get("year", datetime.now().year))
     month = int(request.args.get("month", datetime.now().month))
 
-    target_month_date = date(year, month, 1)
-    ym_str = target_month_date.strftime("%Y-%m")
+    # For current schema: preferences.target_month is VARCHAR/TEXT like "2026-04"
+    target_month_key = f"{year}-{month:02d}"
+    ym_str = target_month_key
     _, last_day = calendar.monthrange(year, month)
 
     conn = get_db_connection()
@@ -451,7 +452,8 @@ def manage_availability():
                         if not days_int:
                             flash("No valid dates found for selected month.", "warning")
                         else:
-                            dates = [date(year, month, d) for d in days_int]
+                            # priority_dates is date[]
+                            dates = [f"{year}-{month:02d}-{d:02d}" for d in days_int]
                             preferred_count = max(1, len(dates) - 2)
 
                             cur.execute("""
@@ -465,14 +467,14 @@ def manage_availability():
                                     preferred_count=EXCLUDED.preferred_count,
                                     priority_dates=EXCLUDED.priority_dates,
                                     updated_at=CURRENT_TIMESTAMP
-                            """, (eng_id, target_month_date, preferred_count, dates))
+                            """, (eng_id, target_month_key, preferred_count, dates))
 
                             flash("Preferences updated.", "success")
                     else:
                         cur.execute("""
                             DELETE FROM preferences
                             WHERE engineer_id=%s AND target_month=%s
-                        """, (eng_id, target_month_date))
+                        """, (eng_id, target_month_key))
                         flash("Preferences cleared.", "success")
 
                 elif action == "add_leave":
@@ -495,6 +497,7 @@ def manage_availability():
                 conn.rollback()
                 flash(f"Save failed: {e}", "error")
 
+        # Engineers for forms
         cur.execute("""
             SELECT id, name
             FROM engineers
@@ -503,6 +506,7 @@ def manage_availability():
         """, (team_id,))
         engineers = cur.fetchall()
 
+        # Submitted preferences table
         cur.execute("""
             SELECT
                 e.id AS engineer_id,
@@ -525,9 +529,10 @@ def manage_availability():
                AND p.status = 'submitted'
             WHERE e.team_id=%s AND e.is_active=TRUE
             ORDER BY e.name
-        """, (target_month_date, team_id))
+        """, (target_month_key, team_id))
         avail_data = cur.fetchall()
 
+        # Leave blockouts
         cur.execute("""
             SELECT l.id, e.name, l.block_date
             FROM leave_blockouts l
