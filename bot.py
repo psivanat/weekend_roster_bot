@@ -14,7 +14,7 @@ os.environ["HTTPS_PROXY"] = "http://proxy-wsa.esl.cisco.com:80"
 # DATABASE HELPER
 # -----------------------------------------
 def get_user_from_db(email):
-    """Checks if the Webex sender is an authorized team member."""
+    """Checks if the Webex sender is an active engineer."""
     try:
         conn = psycopg2.connect(
             host=os.getenv("DB_HOST", "localhost"),
@@ -23,11 +23,14 @@ def get_user_from_db(email):
             password=os.getenv("DB_PASS", "")
         )
         cursor = conn.cursor()
-        cursor.execute("SELECT id, name, role FROM users WHERE email = %s", (email,))
-        user = cursor.fetchone()
+        
+        # Now querying the ENGINEERS table using webex_email
+        cursor.execute("SELECT id, name, team_id FROM engineers WHERE webex_email = %s AND is_active = true", (email,))
+        engineer = cursor.fetchone()
+        
         cursor.close()
         conn.close()
-        return user # Returns (id, name, role) or None
+        return engineer # Returns (id, name, team_id) or None
     except Exception as e:
         print(f"DB Error: {e}")
         return None
