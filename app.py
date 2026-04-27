@@ -10,6 +10,7 @@ from flask import Flask, render_template, request, redirect, url_for, flash, ses
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.security import check_password_hash, generate_password_hash
 from dotenv import load_dotenv
+from webex_notify import send_preference_broadcast, publish_roster_for_month
 
 # Import the isolated backend engine
 from scheduler_engine import generate_monthly_roster, get_weekend_dates
@@ -259,6 +260,51 @@ def manual_override():
         conn.close()
         
     return redirect(url_for('dashboard', year=dt_obj.year, month=dt_obj.month))
+
+@app.route('/admin/broadcast_preferences', methods=['POST'])
+@login_required
+def broadcast_preferences():
+    if current_user.role == 'viewer':
+        flash("Permission denied.", "error")
+        return redirect(url_for('dashboard'))
+
+    team_id = session.get('active_team_id')
+    year = int(request.form.get('year'))
+    month = int(request.form.get('month'))
+
+    try:
+        result = send_preference_broadcast(team_id, year, month)
+        flash(
+            f"Preference request sent. Total: {result['total']}, Sent: {result['sent']}, Failed: {result['failed']}",
+            "success"
+        )
+    except Exception as e:
+        flash(f"Broadcast failed: {e}", "error")
+
+    return redirect(url_for('dashboard', year=year, month=month))
+
+
+@app.route('/admin/publish_roster', methods=['POST'])
+@login_required
+def publish_roster():
+    if current_user.role == 'viewer':
+        flash("Permission denied.", "error")
+        return redirect(url_for('dashboard'))
+
+    team_id = session.get('active_team_id')
+    year = int(request.form.get('year'))
+    month = int(request.form.get('month'))
+
+    try:
+        result = publish_roster_for_month(team_id, year, month)
+        flash(
+            f"Roster published. Total: {result['total']}, Sent: {result['sent']}, Failed: {result['failed']}",
+            "success"
+        )
+    except Exception as e:
+        flash(f"Publish failed: {e}", "error")
+
+    return redirect(url_for('dashboard', year=year, month=month))
 
 @app.route('/api/move_shift', methods=['POST'])
 @login_required

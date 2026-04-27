@@ -24,7 +24,21 @@
                 {% endfor %}
             </select>
         </form>
-        <a href="/export_csv?year={{ selected_year }}&month={{ selected_month }}" class="btn btn-outline">📥 Export CSV</a>
+       <a href="/export_csv?year={{ selected_year }}&month={{ selected_month }}" class="btn btn-outline">📥 Export CSV</a>
+
+    {% if current_user.role != 'viewer' %}
+    <form method="POST" action="/admin/broadcast_preferences" style="margin: 0;">
+        <input type="hidden" name="year" value="{{ selected_year }}">
+        <input type="hidden" name="month" value="{{ selected_month }}">
+        <button type="submit" class="btn btn-outline">📣 Broadcast Preference Request</button>
+    </form>
+
+    <form method="POST" action="/admin/publish_roster" style="margin: 0;">
+        <input type="hidden" name="year" value="{{ selected_year }}">
+        <input type="hidden" name="month" value="{{ selected_month }}">
+        <button type="submit" class="btn">✅ Publish Roster</button>
+    </form>
+    {% endif %}
     </div>
 </div>
 
