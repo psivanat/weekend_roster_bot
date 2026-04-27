@@ -1,5 +1,6 @@
 import os
 import psycopg2
+from datetime import datetime
 from dotenv import load_dotenv
 from webex_bot.webex_bot import WebexBot
 from webex_bot.models.command import Command
@@ -34,6 +35,76 @@ def get_user_from_db(email):
     except Exception as e:
         print(f"DB Error: {e}")
         return None
+
+# -----------------------------------------
+# COMMAND: Step 1 Preferences (Shift Count)
+# -----------------------------------------
+class Step1PreferencesCommand(Command):
+    def __init__(self):
+        super().__init__(
+            command_keyword="step1_preferences",
+            help_message="Start the preference submission process.",
+            card=None
+        )
+
+    def execute(self, message, attachment_actions, activity):
+        # Calculate next month (e.g., "May 2026")
+        now = datetime.now()
+        next_m = now.month + 1 if now.month < 12 else 1
+        next_y = now.year if now.month < 12 else now.year + 1
+        next_month_str = datetime(next_y, next_m, 1).strftime("%B %Y")
+
+        # The Step 1 Card: Ask for 'n'
+        step1_card = {
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "type": "AdaptiveCard",
+                "version": "1.2",
+                "body": [
+                    {
+                        "type": "TextBlock",
+                        "text": f"📅 Preferences for {next_month_str}",
+                        "weight": "Bolder",
+                        "size": "Medium"
+                    },
+                    {
+                        "type": "TextBlock",
+                        "text": "Step 1: How many weekend shifts would you prefer to work next month?",
+                        "wrap": True
+                    },
+                    {
+                        "type": "Input.ChoiceSet",
+                        "id": "preferred_count",
+                        "style": "compact",
+                        "value": "2", # Default value
+                        "choices": [
+                            {"title": "1 Shift", "value": "1"},
+                            {"title": "2 Shifts", "value": "2"},
+                            {"title": "3 Shifts", "value": "3"},
+                            {"title": "4 Shifts", "value": "4"}
+                        ]
+                    }
+                ],
+                "actions": [
+                    {
+                        "type": "Action.Submit",
+                        "title": "Next ➡️",
+                        "data": {"command": "step2_preferences"} # Routes to the next step!
+                    },
+                    {
+                        "type": "Action.Submit",
+                        "title": "🏖️ Opt-Out (Unavailable)",
+                        "data": {"command": "opt_out_preferences"}
+                    }
+                ]
+            }
+        }
+
+        response = Response()
+        response.text = "Please select your preferred shift count."
+        response.attachments = step1_card
+        return response
 
 # -----------------------------------------
 # COMMAND: Hi / Hello / Help (Interactive Menu)
@@ -82,17 +153,17 @@ class HelloCommand(Command):
                     {
                         "type": "Action.Submit",
                         "title": "📝 Update Next Month's Preferences",
-                        "data": {"action": "start_preferences"}
+                        "data": {"command": "step1_preferences"} # <--- Changed to "command"
                     },
                     {
                         "type": "Action.Submit",
                         "title": "📊 View My Upcoming Shifts",
-                        "data": {"action": "view_shifts"}
+                        "data": {"command": "roster"} # <--- Reuses your existing roster command!
                     },
                     {
                         "type": "Action.Submit",
                         "title": "❓ Bot Status",
-                        "data": {"action": "check_status"}
+                        "data": {"command": "status"} # <--- Reuses your existing status command!
                     }
                 ]
             }
@@ -118,5 +189,8 @@ if __name__ == "__main__":
     
     # Register commands
     bot.add_command(HelloCommand())
+    bot.add_command(StatusCommand())
+    bot.add_command(RosterCommand())
+    bot.add_command(Step1PreferencesCommand())
     
     bot.run()
