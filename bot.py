@@ -101,7 +101,7 @@ class HelloCommand(Command):
         # Return the card as a Response object
         response = Response()
         response.text = "This client does not support Adaptive Cards."
-        response.attachments = [menu_card]
+        response.attachments = menu_card 
         return response
 
 # -----------------------------------------
