@@ -194,7 +194,7 @@ class Step2PreferencesCommand(Command):
         return response
 
 # ==========================================
-# COMMAND: Save Preferences
+# COMMAND: Save Preferences (With Validation)
 # ==========================================
 class SavePreferencesCommand(Command):
     def __init__(self):
@@ -202,7 +202,93 @@ class SavePreferencesCommand(Command):
         self.card_callback_keyword = "save_preferences"
 
     def execute(self, message, attachment_actions, activity):
-        return "✅ **Success!** Your preferences have been saved to the database. Thank you!"
+        sender_email = activity.get("actor", {}).get("emailAddress")
+        user = get_user_from_db(sender_email)
+
+        if not user:
+            return "⛔ **Access Denied.**"
+
+        engineer_id = user[0]
+        inputs = attachment_actions.inputs if attachment_actions else {}
+
+        # 1. Extract metadata
+        target_month = inputs.get("target_month")
+        preferred_count = int(inputs.get("preferred_count", 2))
+        min_required = preferred_count + 2
+
+        # 2. Collect all selected dates (skip empty optional fields)
+        selected_dates = []
+        for key, value in sorted(inputs.items()):
+            if key.startswith("priority_") and value:
+                selected_dates.append(value)
+
+        # 3. DUPLICATE CHECK — Remove duplicates but track them
+        seen = set()
+        unique_dates = []
+        duplicates = []
+        for d in selected_dates:
+            if d in seen:
+                duplicates.append(d)
+            else:
+                seen.add(d)
+                unique_dates.append(d)
+
+        # 4. If duplicates were found, warn the user and ask them to re-submit
+        if duplicates:
+            dup_list = ", ".join(set(duplicates))
+            return (
+                f"⚠️ **Duplicate dates detected!**\n\n"
+                f"You selected the same date more than once: **{dup_list}**\n\n"
+                f"Please type **hi** and re-submit your preferences without duplicates."
+            )
+
+        # 5. Check minimum requirement
+        if len(unique_dates) < min_required:
+            return (
+                f"⚠️ **Not enough dates!**\n\n"
+                f"You selected {len(unique_dates)} dates, but the minimum required is **{min_required}** "
+                f"(your preferred shifts + 2).\n\n"
+                f"Please type **hi** and re-submit with at least {min_required} dates."
+            )
+
+        # 6. Save to PostgreSQL
+        try:
+            conn = psycopg2.connect(
+                host=os.getenv("DB_HOST", "localhost"),
+                database=os.getenv("DB_NAME", "roster_db"),
+                user=os.getenv("DB_USER", "postgres"),
+                password=os.getenv("DB_PASS", "")
+            )
+            cursor = conn.cursor()
+
+            # Upsert: Insert or update if preferences already exist for this month
+            cursor.execute("""
+                INSERT INTO preferences (engineer_id, target_month, status, preferred_count, priority_dates, updated_at)
+                VALUES (%s, %s, 'submitted', %s, %s::date[], CURRENT_TIMESTAMP)
+                ON CONFLICT (engineer_id, target_month)
+                DO UPDATE SET
+                    status = 'submitted',
+                    preferred_count = EXCLUDED.preferred_count,
+                    priority_dates = EXCLUDED.priority_dates,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (engineer_id, target_month, preferred_count, unique_dates))
+
+            conn.commit()
+            cursor.close()
+            conn.close()
+
+            # 7. Build a nice confirmation message
+            date_list = "\n".join([f"  {i+1}. **{d}**" for i, d in enumerate(unique_dates)])
+            return (
+                f"✅ **Preferences Saved Successfully!**\n\n"
+                f"📅 **Month:** {target_month}\n"
+                f"🔢 **Preferred Shifts:** {preferred_count}\n"
+                f"📋 **Your Priority Dates:**\n{date_list}\n\n"
+                f"You can update your preferences anytime by typing **hi**."
+            )
+
+        except Exception as e:
+            return f"❌ **Database Error:** Could not save preferences.\n`{str(e)}`"
 
 # ==========================================
 # COMMAND: Opt Out
