@@ -60,8 +60,9 @@ class HelloCommand(Command):
                     {"type": "TextBlock", "text": "What would you like to do today?", "wrap": True}
                 ],
                 "actions": [
-                    {"type": "Action.Submit", "title": "📝 Update Next Month's Preferences", "data": {"command": "step1_preferences"}},
-                    {"type": "Action.Submit", "title": "❓ Bot Status", "data": {"command": "status"}}
+                    # FIX: Changed routing keys here
+                    {"type": "Action.Submit", "title": "📝 Update Next Month's Preferences", "data": {"step1_preferences": "true"}},
+                    {"type": "Action.Submit", "title": "❓ Bot Status", "data": {"status": "true"}}
                 ]
             }
         }
@@ -116,8 +117,9 @@ class Step1PreferencesCommand(Command):
                     }
                 ],
                 "actions": [
-                    {"type": "Action.Submit", "title": "Next ➡️", "data": {"command": "step2_preferences"}},
-                    {"type": "Action.Submit", "title": "🏖️ Opt-Out (Unavailable)", "data": {"command": "opt_out_preferences"}}
+                    # FIX: Changed routing keys here
+                    {"type": "Action.Submit", "title": "Next ➡️", "data": {"step2_preferences": "true"}},
+                    {"type": "Action.Submit", "title": "🏖️ Opt-Out (Unavailable)", "data": {"opt_out_preferences": "true"}}
                 ]
             }
         }
@@ -181,7 +183,8 @@ class Step2PreferencesCommand(Command):
                     {
                         "type": "Action.Submit", 
                         "title": "✅ Submit Preferences", 
-                        "data": {"command": "save_preferences", "target_month": target_month_str, "preferred_count": preferred_count}
+                        # FIX: Changed routing keys here
+                        "data": {"save_preferences": "true", "target_month": target_month_str, "preferred_count": preferred_count}
                     }
                 ]
             }
