@@ -644,7 +644,7 @@ def manage_availability():
                     conn, source="gui", action=action or "UNKNOWN_ACTION", status="failed",
                     team_id=team_id, target_month=target_month_key,
                     entity_type="preferences", entity_id=eng_id,
-                    error_message=str(e)
+                    error_message=str(ex)
                 )
                 conn.commit()
 
