@@ -37,50 +37,37 @@ def fetch_data_from_db(year, month, weekend_dates, team_id):
     conn = psycopg2.connect(**DB_PARAMS)
     cursor = conn.cursor()
 
-    # max_shifts is already fetched and used (per-engineer limit)
-    cursor.execute("SELECT id, name, max_shifts FROM engineers WHERE is_active = TRUE AND team_id = %s", (team_id,))
-    active_engs = cursor.fetchall()
+    # Source of truth: preferences table only
+    # Eligible engineers = submitted + preferred_count > 0 + non-empty priority_dates
+    cursor.execute("""
+        SELECT e.id, e.name, p.preferred_count, p.priority_dates
+        FROM preferences p
+        JOIN engineers e ON e.id = p.engineer_id
+        WHERE e.is_active = TRUE
+        AND e.team_id = %s
+        AND p.target_month = %s
+        AND p.status = 'submitted'
+        AND p.preferred_count > 0
+        AND cardinality(p.priority_dates) > 0
+    """, (team_id, year_month))
+    eligible_rows = cursor.fetchall()
 
-    for eng_id, name, max_shifts in active_engs:
+    for eng_id, name, preferred_count, priority_dates in eligible_rows:
         engineers.append(name)
-        eng_max_shifts[name] = max_shifts if max_shifts is not None else 0
 
-        # NEW SOURCE: preferences table (date[])
-        cursor.execute("""
-            SELECT priority_dates
-            FROM preferences
-            WHERE engineer_id = %s
-              AND target_month = %s
-              AND status = 'submitted'
-        """, (eng_id, year_month))
-        res_pref = cursor.fetchone()
+        # Per-month max shifts comes from preferences.preferred_count
+        eng_max_shifts[name] = preferred_count if preferred_count is not None else 0
 
-        if res_pref and res_pref[0]:
-            pref_dates = [d.strftime('%Y-%m-%d') for d in res_pref[0]]
-            availability[name] = [d for d in pref_dates if d in weekend_set]
-        else:
-            # optional fallback to legacy table during migration
-            cursor.execute("SELECT preferences FROM availability WHERE engineer_id = %s AND year_month = %s", (eng_id, year_month))
-            res_avail = cursor.fetchone()
-            if res_avail and res_avail[0]:
-                nums = [int(x.strip()) for x in res_avail[0].split(",") if x.strip().isdigit()]
-                mapped = []
-                for n in nums:
-                    try:
-                        d = datetime(year, month, n).strftime('%Y-%m-%d')
-                        if d in weekend_set:
-                            mapped.append(d)
-                    except ValueError:
-                        pass
-                availability[name] = mapped
-            else:
-                availability[name] = []
+        # Keep ranked order from date[] and filter to weekend dates of this month
+        pref_dates = [d.strftime('%Y-%m-%d') for d in (priority_dates or [])]
+        availability[name] = [d for d in pref_dates if d in weekend_set]
 
-        # Leave Blockouts
+        # Leave blockouts
         cursor.execute("""
             SELECT block_date
             FROM leave_blockouts
-            WHERE engineer_id = %s AND TO_CHAR(block_date, 'YYYY-MM') = %s
+            WHERE engineer_id = %s
+            AND TO_CHAR(block_date, 'YYYY-MM') = %s
         """, (eng_id, year_month))
         eng_leaves[name] = [row[0].strftime('%Y-%m-%d') for row in cursor.fetchall()]
 
