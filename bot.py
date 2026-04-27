@@ -291,7 +291,7 @@ class SavePreferencesCommand(Command):
             return f"❌ **Database Error:** Could not save preferences.\n`{str(e)}`"
 
 # ==========================================
-# COMMAND: Opt Out
+# COMMAND: Opt Out (With DB Save)
 # ==========================================
 class OptOutCommand(Command):
     def __init__(self):
@@ -299,7 +299,53 @@ class OptOutCommand(Command):
         self.card_callback_keyword = "opt_out_preferences"
 
     def execute(self, message, attachment_actions, activity):
-        return "🏖️ **Opt-Out Confirmed:** You have been marked as unavailable for next month."
+        sender_email = activity.get("actor", {}).get("emailAddress")
+        user = get_user_from_db(sender_email)
+
+        if not user:
+            return "⛔ **Access Denied.**"
+
+        engineer_id = user[0]
+
+        # Calculate next month
+        now = datetime.now()
+        next_m = now.month + 1 if now.month < 12 else 1
+        next_y = now.year if now.month < 12 else now.year + 1
+        target_month = f"{next_y}-{next_m:02d}"
+
+        try:
+            conn = psycopg2.connect(
+                host=os.getenv("DB_HOST", "localhost"),
+                database=os.getenv("DB_NAME", "roster_db"),
+                user=os.getenv("DB_USER", "postgres"),
+                password=os.getenv("DB_PASS", "")
+            )
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                INSERT INTO preferences (engineer_id, target_month, status, preferred_count, priority_dates, updated_at)
+                VALUES (%s, %s, 'opted_out', 0, NULL, CURRENT_TIMESTAMP)
+                ON CONFLICT (engineer_id, target_month)
+                DO UPDATE SET
+                    status = 'opted_out',
+                    preferred_count = 0,
+                    priority_dates = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (engineer_id, target_month))
+
+            conn.commit()
+            cursor.close()
+            conn.close()
+
+            return (
+                f"🏖️ **Opt-Out Confirmed!**\n\n"
+                f"You have been marked as **unavailable** for **{target_month}**.\n"
+                f"The scheduling engine will skip you for this month.\n\n"
+                f"Changed your mind? Type **hi** and submit your preferences."
+            )
+
+        except Exception as e:
+            return f"❌ **Database Error:** Could not save opt-out.\n`{str(e)}`"
 
 # ==========================================
 # BOT INITIALIZATION
