@@ -640,16 +640,20 @@ def manage_availability():
                     leave_id = request.form.get("leave_id")
                     cur.execute("DELETE FROM leave_blockouts WHERE id=%s", (leave_id,))
                     flash("Leave blockout removed.", "success")
-                audit_log(
-                    conn, source="gui", action=action or "UNKNOWN_ACTION", status="failed",
-                    team_id=team_id, target_month=target_month_key,
-                    entity_type="preferences", entity_id=eng_id,
-                    error_message=str(ex)
-                )
                 conn.commit()
 
             except Exception as ex:
                 conn.rollback()
+                try:
+                    audit_log(
+                        conn, source="gui", action=action or "UNKNOWN_ACTION", status="failed",
+                        team_id=team_id, target_month=target_month_key,
+                        entity_type="preferences", entity_id=eng_id,
+                        error_message=str(ex)
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
                 flash(f"Save failed: {ex}", "error")
 
         # Engineers for forms
