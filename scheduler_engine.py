@@ -37,28 +37,28 @@ def fetch_data_from_db(year, month, weekend_dates, team_id):
     conn = psycopg2.connect(**DB_PARAMS)
     cursor = conn.cursor()
 
-    # Source of truth: preferences table only
-    # Eligible engineers = submitted + preferred_count > 0 + non-empty priority_dates
+    # Source of truth for eligibility: preferences table
+    # Hard cap for assignments: engineers.max_shifts
     cursor.execute("""
-        SELECT e.id, e.name, p.preferred_count, p.priority_dates
+        SELECT e.id, e.name, e.max_shifts, p.priority_dates
         FROM preferences p
         JOIN engineers e ON e.id = p.engineer_id
         WHERE e.is_active = TRUE
-        AND e.team_id = %s
-        AND p.target_month = %s
-        AND p.status = 'submitted'
-        AND p.preferred_count > 0
-        AND cardinality(p.priority_dates) > 0
+          AND e.team_id = %s
+          AND p.target_month = %s
+          AND p.status = 'submitted'
+          AND p.preferred_count > 0
+          AND cardinality(p.priority_dates) > 0
     """, (team_id, year_month))
     eligible_rows = cursor.fetchall()
 
-    for eng_id, name, preferred_count, priority_dates in eligible_rows:
+    for eng_id, name, max_shifts, priority_dates in eligible_rows:
         engineers.append(name)
 
-        # Per-month max shifts comes from preferences.preferred_count
-        eng_max_shifts[name] = preferred_count if preferred_count is not None else 0
+        # Enforce hard per-engineer cap from engineers table
+        eng_max_shifts[name] = max_shifts if max_shifts is not None else 0
 
-        # Keep ranked order from date[] and filter to weekend dates of this month
+        # Keep ranked order from date[]; filter to weekends in the target month
         pref_dates = [d.strftime('%Y-%m-%d') for d in (priority_dates or [])]
         availability[name] = [d for d in pref_dates if d in weekend_set]
 
@@ -67,7 +67,7 @@ def fetch_data_from_db(year, month, weekend_dates, team_id):
             SELECT block_date
             FROM leave_blockouts
             WHERE engineer_id = %s
-            AND TO_CHAR(block_date, 'YYYY-MM') = %s
+              AND TO_CHAR(block_date, 'YYYY-MM') = %s
         """, (eng_id, year_month))
         eng_leaves[name] = [row[0].strftime('%Y-%m-%d') for row in cursor.fetchall()]
 
