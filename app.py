@@ -420,14 +420,28 @@ def manage_availability():
         action = request.form.get('action')
         
         if action == 'update_prefs':
-            prefs = request.form.get('preferences')
-            if prefs.strip():
+            prefs = request.form.get('preferences', '').strip()
+
+            if prefs:
+                days = [x.strip() for x in prefs.split(',') if x.strip().isdigit()]
+                dates = [f"{year_month_str}-{int(d):02d}" for d in days]
+
                 cursor.execute("""
-                    INSERT INTO availability (engineer_id, year_month, preferences) VALUES (%s, %s, %s)
-                    ON CONFLICT (engineer_id, year_month) DO UPDATE SET preferences = EXCLUDED.preferences
-                """, (eng_id, year_month_str, prefs))
+                    INSERT INTO preferences (engineer_id, target_month, status, preferred_count, priority_dates, updated_at)
+                    VALUES (%s, %s, 'submitted', %s, %s::date[], CURRENT_TIMESTAMP)
+                    ON CONFLICT (engineer_id, target_month)
+                    DO UPDATE SET
+                        status = 'submitted',
+                        preferred_count = EXCLUDED.preferred_count,
+                        priority_dates = EXCLUDED.priority_dates,
+                        updated_at = CURRENT_TIMESTAMP
+                """, (eng_id, year_month_str, max(1, len(dates)-2), dates))
             else:
-                cursor.execute("DELETE FROM availability WHERE engineer_id = %s AND year_month = %s", (eng_id, year_month_str))
+                cursor.execute("""
+                    DELETE FROM preferences
+                    WHERE engineer_id = %s AND target_month = %s
+                """, (eng_id, year_month_str))
+
             flash("Preferences updated.", "success")
             
         elif action == 'add_leave':
@@ -442,7 +456,30 @@ def manage_availability():
             
         conn.commit()
 
-    cursor.execute("SELECT id, name FROM engineers WHERE team_id = %s AND is_active = TRUE ORDER BY name", (team_id,))
+    cursor.execute("""
+        SELECT 
+            e.id as engineer_id,
+            e.name,
+            COALESCE(
+                array_to_string(
+                    ARRAY(
+                        SELECT EXTRACT(DAY FROM d)::int::text
+                        FROM unnest(p.priority_dates) AS d
+                        ORDER BY d
+                    ), ', '
+                ),
+                ''
+            ) AS preferences
+        FROM engineers e
+        LEFT JOIN preferences p
+            ON e.id = p.engineer_id
+        AND p.target_month = %s
+        AND p.status = 'submitted'
+        WHERE e.team_id = %s AND e.is_active = TRUE
+        ORDER BY e.name
+    """, (year_month_str, team_id))
+    avail_data = cursor.fetchall()
+
     engineers = cursor.fetchall()
     
     cursor.execute("""
