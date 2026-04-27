@@ -247,11 +247,21 @@ class Step2PreferencesCommand(Command):
         preferred_count = int(inputs.get("preferred_count", 2))
         min_required = preferred_count + 2
 
-        m, y, target_month, _ = get_next_month_info()
+        # Use target_month from card if present (from GUI broadcast), else fallback to next month
+        target_month = inputs.get("target_month")
+        if target_month:
+            y, m = map(int, target_month.split("-"))
+        else:
+            m, y, target_month, _ = get_next_month_info()
+
         weekends = get_weekend_dates(y, m)
         min_required = min(min_required, len(weekends))
 
-        choices = [{"title": d.strftime("%A, %d-%m-%Y"), "value": d.strftime("%Y-%m-%d")} for d in weekends]
+        # Add dummy blank option to prevent auto-select in some Webex clients
+        choices = [{"title": "-- Select a date --", "value": ""}] + [
+            {"title": d.strftime("%A, %d-%m-%Y"), "value": d.strftime("%Y-%m-%d")}
+            for d in weekends
+        ]
 
         body = [
             {"type": "TextBlock", "text": "📅 Step 2: Rank Date Preferences", "weight": "Bolder", "size": "Medium"},
@@ -267,6 +277,8 @@ class Step2PreferencesCommand(Command):
                 "id": f"priority_{i}",
                 "style": "compact",
                 "choices": choices,
+                "value": "",  # force blank
+                "placeholder": "Select a date...",
                 "isRequired": req,
                 "errorMessage": f"Priority {i} is required."
             })
@@ -317,8 +329,8 @@ class SavePreferencesCommand(Command):
 
         selected = []
         for k, v in sorted(inputs.items()):
-            if k.startswith("priority_") and v:
-                selected.append(v)
+            if k.startswith("priority_") and v and v.strip():
+                selected.append(v.strip())
 
         seen = set()
         unique = []
