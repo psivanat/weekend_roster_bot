@@ -18,12 +18,36 @@ DB_PARAMS = {
     "password": os.getenv("DB_PASS")
 }
 
+def fetch_historical_shift_counts(year, month, team_id, months_back):
+    conn = psycopg2.connect(**DB_PARAMS)
+    cursor = conn.cursor()
+    
+    # The first day of the target month
+    target_date = f"{year}-{month:02d}-01"
+    
+    # Query PostgreSQL to count shifts in the exact interval before this month
+    cursor.execute(f"""
+        SELECT e.name, COUNT(r.id) 
+        FROM roster_assignments r
+        JOIN engineers e ON r.engineer_id = e.id
+        WHERE r.team_id = %s 
+          AND r.shift_date < %s::date
+          AND r.shift_date >= (%s::date - INTERVAL '{months_back} months')
+        GROUP BY e.name
+    """, (team_id, target_date, target_date))
+    
+    counts = {row[0]: row[1] for row in cursor.fetchall()}
+    cursor.close()
+    conn.close()
+    return counts
+
 def fetch_team_settings(team_id):
     conn = psycopg2.connect(**DB_PARAMS)
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute("""
         SELECT sat_coverage, sun_coverage, min_preferences, 
-               strict_7_day_rest, allow_same_weekend 
+               strict_7_day_rest, allow_same_weekend,
+               consider_historical_shifts, historical_months_count
         FROM teams WHERE id = %s
     """, (team_id,))
     res = cursor.fetchone()
@@ -31,13 +55,15 @@ def fetch_team_settings(team_id):
     conn.close()
     
     if not res:
-        return {"sat_coverage": 1, "sun_coverage": 1, "strict_7_day_rest": False, "allow_same_weekend": False}
+        return {"sat_coverage": 1, "sun_coverage": 1, "strict_7_day_rest": False, "allow_same_weekend": False, "consider_historical_shifts": False, "historical_months_count": 1}
         
     return {
         "sat_coverage": res["sat_coverage"], 
         "sun_coverage": res["sun_coverage"], 
         "strict_7_day_rest": res["strict_7_day_rest"] or False,
-        "allow_same_weekend": res["allow_same_weekend"] or False
+        "allow_same_weekend": res["allow_same_weekend"] or False,
+        "consider_historical_shifts": res["consider_historical_shifts"] or False,
+        "historical_months_count": res["historical_months_count"] or 1
     }
 
 def fetch_data_from_db(year, month, weekend_dates, team_id):
@@ -252,16 +278,13 @@ def draft_roster(availability, eng_max_shifts, eng_leaves, weekend_dates, settin
 
         # FAIRNESS SORTER
         def candidate_sort_key(e):
-            # 1. Spread shifts evenly
-            # 2. Balance Sat vs Sun
-            # 3. Reward flexibility (people who gave more dates get priority)
-            # 4. Respect their ranked preference
             return (
-                shifts_count[e], 
-                saturday_count[e] if is_sat else sunday_count[e], 
-                -len(availability.get(e, [])), 
-                availability[e].index(current_day),
-                rng.random()
+                shifts_count[e],                           # 1. Balance current month first (everyone gets 1, then 2, etc.)
+                historical_counts.get(e, 0),               # 2. TIE-BREAKER: Give priority to those with fewer historical shifts!
+                saturday_count[e] if is_sat else sunday_count[e], # 3. Balance Sat vs Sun
+                -len(availability.get(e, [])),             # 4. Reward flexibility
+                availability[e].index(current_day),        # 5. Respect preference rank
+                rng.random()                               # 6. Random tie-breaker
             )
 
         candidates.sort(key=candidate_sort_key)

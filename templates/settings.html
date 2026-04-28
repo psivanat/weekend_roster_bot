@@ -31,7 +31,7 @@
                 <label>Minimum Preferences Required</label>
                 <input type="number" name="min_preferences" value="{{ settings.min_preferences }}" min="0" required>
                 
-                <!-- NEW: Algorithm Constraint Toggles -->
+                <!-- Algorithm Constraint Toggles -->
                 <div style="margin-top: 20px;">
                     <label style="display: flex; align-items: center; gap: 8px; font-weight: bold; cursor: pointer;">
                         <input type="checkbox" name="strict_7_day_rest" {% if settings.strict_7_day_rest %}checked{% endif %} style="width: auto; margin: 0;">
@@ -49,6 +49,23 @@
                         Allows an engineer to be assigned to both Sat & Sun of the same weekend.
                     </small>
                 </div>
+
+                <!-- NEW: Historical Fairness -->
+                <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid #eee;">
+                    <label style="display: flex; align-items: center; gap: 8px; font-weight: bold; cursor: pointer;">
+                        <input type="checkbox" name="consider_historical_shifts" {% if settings.consider_historical_shifts %}checked{% endif %} style="width: auto; margin: 0;">
+                        Balance Historical Shifts
+                    </label>
+                    <small style="display: block; color: #666; margin-bottom: 10px; margin-left: 22px;">
+                        Prioritize engineers with fewer shifts in previous months.
+                    </small>
+                    
+                    <div style="margin-left: 22px;">
+                        <label style="font-size: 0.9em; display: inline-block; margin-right: 10px; margin-bottom: 0;">Months to look back (1-12):</label>
+                        <input type="number" name="historical_months_count" value="{{ settings.historical_months_count | default(1) }}" min="1" max="12" style="width: 80px; padding: 4px; display: inline-block;">
+                    </div>
+                </div>
+
             </div>
         </div>
         <button type="submit" class="btn" style="margin-top: 20px;">💾 Save Settings</button>

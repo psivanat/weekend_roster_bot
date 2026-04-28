@@ -796,25 +796,21 @@ def settings():
             # If a checkbox is unchecked, it isn't sent in request.form
             strict_7_day_rest = 'strict_7_day_rest' in request.form
             allow_same_weekend = 'allow_same_weekend' in request.form
+            consider_historical_shifts = 'consider_historical_shifts' in request.form
+            historical_months_count = int(request.form.get("historical_months_count", 1))
 
             cur.execute("""
                 UPDATE teams
-                SET sat_coverage=%s, 
-                    sun_coverage=%s, 
-                    min_preferences=%s, 
-                    shift_start_time=%s, 
-                    shift_end_time=%s,
-                    strict_7_day_rest=%s,
-                    allow_same_weekend=%s
+                SET sat_coverage=%s, sun_coverage=%s, min_preferences=%s, 
+                    shift_start_time=%s, shift_end_time=%s,
+                    strict_7_day_rest=%s, allow_same_weekend=%s,
+                    consider_historical_shifts=%s, historical_months_count=%s
                 WHERE id=%s
             """, (
-                sat_coverage,
-                sun_coverage,
-                min_preferences,
-                shift_start_time,
-                shift_end_time,
-                strict_7_day_rest,
-                allow_same_weekend,
+                sat_coverage, sun_coverage, min_preferences, 
+                shift_start_time, shift_end_time,
+                strict_7_day_rest, allow_same_weekend,
+                consider_historical_shifts, historical_months_count,
                 team_id
             ))
 
