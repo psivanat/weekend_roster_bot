@@ -84,32 +84,50 @@ def fetch_data_from_db(year, month, weekend_dates, team_id):
 def fetch_boundary_roster(year, month, team_id):
     conn = psycopg2.connect(**DB_PARAMS)
     cursor = conn.cursor()
+    
     first_day = datetime(year, month, 1)
     last_day = datetime(year, month, calendar.monthrange(year, month)[1])
+    
     start_bound = (first_day - timedelta(days=7)).strftime('%Y-%m-%d')
     end_bound = (last_day + timedelta(days=7)).strftime('%Y-%m-%d')
+    
+    # The formatted current month to exclude (e.g., '2026-05')
+    current_month_str = f"{year}-{month:02d}"
 
+    # NEW: Added AND TO_CHAR(r.shift_date, 'YYYY-MM') != %s to exclude the current month
     cursor.execute("""
         SELECT shift_date, e.name FROM roster_assignments r
         JOIN engineers e ON r.engineer_id = e.id
-        WHERE r.team_id = %s AND r.shift_date >= %s::date AND r.shift_date <= %s::date
-    """, (team_id, start_bound, end_bound))
+        WHERE r.team_id = %s 
+          AND r.shift_date >= %s::date 
+          AND r.shift_date <= %s::date
+          AND TO_CHAR(r.shift_date, 'YYYY-MM') != %s
+    """, (team_id, start_bound, end_bound, current_month_str))
 
     boundary_roster = {}
     for row in cursor.fetchall():
         date_str = row[0].strftime('%Y-%m-%d')
-        boundary_roster.setdefault(date_str, []).append(row[1])
+        if date_str not in boundary_roster:
+            boundary_roster[date_str] = []
+        boundary_roster[date_str].append(row[1])
 
     cursor.close()
     conn.close()
     return boundary_roster
 
-def save_roster_to_db(roster, team_id):
+def save_roster_to_db(roster, team_id, year, month):
     conn = psycopg2.connect(**DB_PARAMS)
     cursor = conn.cursor()
-    dates = list(roster.keys())
-    if dates:
-        cursor.execute("DELETE FROM roster_assignments WHERE team_id = %s AND shift_date = ANY(%s::date[])", (team_id, dates))
+    year_month = f"{year}-{month:02d}"
+    
+    try:
+        # 1. Delete the old roster for this month ONLY (happens inside the transaction)
+        cursor.execute("""
+            DELETE FROM roster_assignments 
+            WHERE team_id = %s AND TO_CHAR(shift_date, 'YYYY-MM') = %s
+        """, (team_id, year_month))
+        
+        # 2. Insert the newly generated roster
         for date_str, assigned_names in roster.items():
             for name in assigned_names:
                 cursor.execute("SELECT id FROM engineers WHERE name = %s AND team_id = %s", (name, team_id))
@@ -119,9 +137,17 @@ def save_roster_to_db(roster, team_id):
                         "INSERT INTO roster_assignments (shift_date, team_id, engineer_id) VALUES (%s, %s, %s)",
                         (date_str, team_id, eng[0])
                     )
-    conn.commit()
-    cursor.close()
-    conn.close()
+                    
+        # 3. Commit the transaction (This safely swaps the old for the new instantly)
+        conn.commit()
+        
+    except Exception as e:
+        # If anything fails, cancel the deletion and keep the old roster!
+        conn.rollback()
+        raise e
+    finally:
+        cursor.close()
+        conn.close()
 
 def get_weekend_dates(year, month):
     return [day.strftime('%Y-%m-%d') for day in calendar.Calendar().itermonthdates(year, month) if day.month == month and day.weekday() in (5, 6)]
@@ -299,7 +325,7 @@ def generate_monthly_roster(year, month, team_id, seed=42):
         )
 
         if roster:
-            save_roster_to_db(roster, team_id)
+            save_roster_to_db(roster, team_id, year, month)
             total_assigned = sum(len(v) for v in roster.values())
             audit_log(
                 conn=conn_audit, source="scheduler", action="RUN_ALGORITHM_SUCCESS", status="success",
