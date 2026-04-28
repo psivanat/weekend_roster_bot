@@ -24,6 +24,31 @@ DB_PARAMS = {
     "password": os.getenv("DB_PASS")
 }
 
+def get_upcoming_weekend():
+    now = datetime.now()
+    days_ahead_sat = 5 - now.weekday()
+    if days_ahead_sat < 0:
+        days_ahead_sat += 7
+    next_sat = now + timedelta(days=days_ahead_sat)
+    next_sun = next_sat + timedelta(days=1)
+    return next_sat.date(), next_sun.date()
+
+def is_user_admin(email, team_id):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT u.role FROM users u
+            JOIN user_teams ut ON u.id = ut.user_id
+            WHERE u.email = %s AND ut.team_id = %s
+        """, (email, team_id))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return row and row[0] in ['team_admin', 'super_admin']
+    except Exception:
+        return False
+
 def bot_audit(action, status="success", team_id=None, target_month=None, entity_type=None,
               entity_id=None, details=None, error_message=None):
     conn = None
@@ -340,16 +365,48 @@ def build_step1_card(month_display, team_name=None):
 
 class HelloCommand(Command):
     def __init__(self):
-        super().__init__(command_keyword="hi", help_message="Show menu", card=None)
+        super().__init__(command_keyword="hi", help_message="Show the main interactive menu.", card=None)
         self.aliases = ["hello", "help", "menu"]
 
     def execute(self, message, attachment_actions, activity):
         sender = activity.get("personEmail") or activity.get("actor", {}).get("emailAddress")
         eng = get_engineer_by_email(sender)
         if not eng:
-            bot_audit("BOT_HELLO_DENIED", status="failed", details={"email": sender}, error_message="not_registered")
             return "⛔ Access Denied: You are not registered as an active engineer."
-        bot_audit("BOT_HELLO_MENU", team_id=eng[2], entity_type="engineer", entity_id=eng[0], details={"email": sender})
+
+        engineer_id, name, team_id = eng
+        _, _, target_month, display_month = get_next_month_info()
+        is_admin = is_user_admin(sender, team_id)
+
+        bot_audit("BOT_MENU_OPEN", team_id=team_id, entity_type="engineer", entity_id=engineer_id, details={"email": sender})
+
+        # Build the Adaptive Card
+        body = [
+            {"type": "TextBlock", "text": f"👋 Welcome back, {name}!", "weight": "Bolder", "size": "Large"},
+            {"type": "TextBlock", "text": "What would you like to do today?", "wrap": True},
+            {"type": "TextBlock", "text": "📅 My Schedule", "weight": "Bolder", "spacing": "Medium", "color": "Accent"}
+        ]
+
+        actions = [
+            {"type": "Action.Submit", "title": f"📝 Update Preferences ({display_month})", "data": {"callback_keyword": "step1_preferences"}},
+            {"type": "Action.Submit", "title": "🔍 View My Submitted Preferences", "data": {"callback_keyword": "my_preferences"}},
+            {"type": "Action.Submit", "title": "📆 View My Upcoming Shifts", "data": {"callback_keyword": "my_shifts"}}
+        ]
+
+        body.append({"type": "ActionSet", "actions": actions})
+        body.append({"type": "TextBlock", "text": "👥 Team Roster", "weight": "Bolder", "spacing": "Medium", "color": "Accent"})
+        body.append({
+            "type": "ActionSet", 
+            "actions": [{"type": "Action.Submit", "title": "👀 Who is working this weekend?", "data": {"callback_keyword": "who_is_working"}}]
+        })
+
+        # Admin Section
+        if is_admin:
+            body.append({"type": "TextBlock", "text": "⚙️ Admin Tools", "weight": "Bolder", "spacing": "Medium", "color": "Attention"})
+            body.append({
+                "type": "ActionSet", 
+                "actions": [{"type": "Action.Submit", "title": "⏳ Check Pending Submissions", "data": {"callback_keyword": "pending_status"}}]
+            })
 
         card = {
             "contentType": "application/vnd.microsoft.card.adaptive",
@@ -357,18 +414,12 @@ class HelloCommand(Command):
                 "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
                 "type": "AdaptiveCard",
                 "version": "1.2",
-                "body": [
-                    {"type": "TextBlock", "text": f"👋 Welcome back, {eng[1]}!", "weight": "Bolder", "size": "Medium"},
-                    {"type": "TextBlock", "text": "Choose an option:", "wrap": True}
-                ],
-                "actions": [
-                    {"type": "Action.Submit", "title": "📝 Update Next Month Preferences", "data": {"callback_keyword": "step1_preferences"}},
-                    {"type": "Action.Submit", "title": "❓ Bot Status", "data": {"callback_keyword": "status"}}
-                ]
+                "body": body
             }
         }
+
         r = Response()
-        r.text = "Menu"
+        r.text = "Main Menu"
         r.attachments = card
         return r
 
@@ -481,6 +532,183 @@ class Step2PreferencesCommand(Command):
         r.text = "Preference Step 2"
         r.attachments = card
         return r
+
+class MyPreferencesCommand(Command):
+    def __init__(self):
+        super().__init__(command_keyword="my_preferences", help_message="View submitted preferences.", card=None)
+
+    def execute(self, message, attachment_actions, activity):
+        sender = activity.get("personEmail") or activity.get("actor", {}).get("emailAddress")
+        eng = get_engineer_by_email(sender)
+        if not eng: return "⛔ Access Denied."
+        
+        engineer_id, name, team_id = eng
+        _, _, target_month, display_month = get_next_month_info()
+
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT status, preferred_count, priority_dates FROM preferences WHERE engineer_id=%s AND target_month=%s", (engineer_id, target_month))
+            pref = cur.fetchone()
+            cur.close()
+            conn.close()
+
+            bot_audit("BOT_MY_PREFS_CHECK", team_id=team_id, entity_type="engineer", entity_id=engineer_id)
+
+            if not pref:
+                return f"⏳ You have not submitted preferences for **{display_month}** yet. Type `hi` to submit them."
+            
+            status, count, dates = pref
+            if status == 'opted_out':
+                return f"🏖️ You have **opted out** of shifts for **{display_month}**."
+            
+            msg = f"📋 **Your Preferences for {display_month}:**\n\n"
+            msg += f"**Requested Shifts:** {count}\n**Ranked Dates:**\n"
+            for i, d in enumerate(dates or [], 1):
+                msg += f"{i}. {d.strftime('%A, %d %b %Y')}\n"
+            return msg
+        except Exception as e:
+            return f"❌ DB Error: {e}"
+
+class MyShiftsCommand(Command):
+    def __init__(self):
+        super().__init__(command_keyword="my_shifts", help_message="View your upcoming shifts.", card=None)
+
+    def execute(self, message, attachment_actions, activity):
+        sender = activity.get("personEmail") or activity.get("actor", {}).get("emailAddress")
+        eng = get_engineer_by_email(sender)
+        if not eng: return "⛔ Access Denied."
+
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT shift_date FROM roster_assignments WHERE engineer_id=%s AND shift_date >= CURRENT_DATE ORDER BY shift_date", (eng[0],))
+            shifts = cur.fetchall()
+            cur.close()
+            conn.close()
+
+            bot_audit("BOT_MY_SHIFTS_CHECK", team_id=eng[2], entity_type="engineer", entity_id=eng[0])
+
+            if not shifts: return f"Hi {eng[1]}, you currently have no upcoming shifts scheduled."
+            msg = f"📅 **Your Upcoming Shifts, {eng[1]}:**\n\n"
+            for (d,) in shifts: msg += f"- {d.strftime('%A, %d %b %Y')}\n"
+            return msg
+        except Exception as e:
+            return f"❌ DB Error: {e}"
+
+class WhoIsWorkingCommand(Command):
+    def __init__(self):
+        super().__init__(command_keyword="who_is_working", help_message="See who is working this weekend.", card=None)
+
+    def execute(self, message, attachment_actions, activity):
+        sender = activity.get("personEmail") or activity.get("actor", {}).get("emailAddress")
+        eng = get_engineer_by_email(sender)
+        if not eng: return "⛔ Access Denied."
+
+        sat_date, sun_date = get_upcoming_weekend()
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT r.shift_date, e.name FROM roster_assignments r
+                JOIN engineers e ON r.engineer_id = e.id
+                WHERE r.team_id=%s AND r.shift_date IN (%s, %s) ORDER BY r.shift_date, e.name
+            """, (eng[2], sat_date, sun_date))
+            results = cur.fetchall()
+            cur.close()
+            conn.close()
+
+            bot_audit("BOT_WHO_IS_WORKING_CHECK", team_id=eng[2], entity_type="engineer", entity_id=eng[0])
+
+            sat_workers = [r[1] for r in results if str(r[0]) == str(sat_date)]
+            sun_workers = [r[1] for r in results if str(r[0]) == str(sun_date)]
+            
+            msg = f"👥 **Upcoming Weekend Roster:**\n\n"
+            msg += f"**Saturday ({sat_date.strftime('%d %b')}):** {', '.join(sat_workers) if sat_workers else 'No one scheduled.'}\n"
+            msg += f"**Sunday ({sun_date.strftime('%d %b')}):** {', '.join(sun_workers) if sun_workers else 'No one scheduled.'}"
+            return msg
+        except Exception as e:
+            return f"❌ DB Error: {e}"
+
+class PendingStatusCommand(Command):
+    def __init__(self):
+        super().__init__(command_keyword="pending_status", help_message="Admin: Check pending submissions.", card=None)
+
+    def execute(self, message, attachment_actions, activity):
+        sender = activity.get("personEmail") or activity.get("actor", {}).get("emailAddress")
+        eng = get_engineer_by_email(sender)
+        if not eng or not is_user_admin(sender, eng[2]): return "⛔ Access Denied: Admin only."
+
+        _, _, target_month, display_month = get_next_month_info()
+        pending = get_pending_engineers(target_month, team_id=eng[2])
+        
+        bot_audit("BOT_ADMIN_PENDING_CHECK", team_id=eng[2], details={"pending_count": len(pending)})
+
+        if not pending:
+            return f"✅ **All Good!** Every engineer in your team has submitted preferences for {display_month}."
+
+        names = [p[1] for p in pending]
+        
+        # Adaptive Card with the "Send Reminders" button
+        card = {
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "type": "AdaptiveCard",
+                "version": "1.2",
+                "body": [
+                    {"type": "TextBlock", "text": f"⏳ Pending Submissions ({display_month})", "weight": "Bolder", "size": "Medium"},
+                    {"type": "TextBlock", "text": f"{len(names)} engineers have not submitted yet:", "wrap": True},
+                    {"type": "TextBlock", "text": ", ".join(names), "wrap": True, "color": "Attention"}
+                ],
+                "actions": [
+                    {
+                        "type": "Action.Submit", 
+                        "title": "🔔 Send Reminders Now", 
+                        "data": {"callback_keyword": "send_reminders_now", "target_month": target_month}
+                    }
+                ]
+            }
+        }
+        r = Response()
+        r.text = "Pending Status"
+        r.attachments = card
+        return r
+
+class SendRemindersNowCommand(Command):
+    def __init__(self):
+        super().__init__(command_keyword="send_reminders_now", help_message="Admin: Send manual reminders.", card=None)
+
+    def execute(self, message, attachment_actions, activity):
+        sender = activity.get("personEmail") or activity.get("actor", {}).get("emailAddress")
+        eng = get_engineer_by_email(sender)
+        if not eng or not is_user_admin(sender, eng[2]): return "⛔ Access Denied."
+
+        inputs = attachment_actions.inputs if attachment_actions else {}
+        target_month = inputs.get("target_month")
+        _, _, _, display_month = get_next_month_info()
+        
+        pending = get_pending_engineers(target_month, team_id=eng[2])
+        if not pending: return "✅ No pending engineers to remind."
+
+        team_name = get_team_name(eng[2])
+        card = build_step1_card(display_month, team_name=team_name)
+        
+        sent_count = 0
+        for _, name, email, _ in pending:
+            if email and bot_instance:
+                try:
+                    bot_instance.teams.messages.create(
+                        toPersonEmail=email,
+                        text="Reminder: Please submit your weekend shift preferences.",
+                        attachments=[card]
+                    )
+                    sent_count += 1
+                except Exception:
+                    pass
+
+        bot_audit("BOT_ADMIN_MANUAL_REMINDERS", team_id=eng[2], details={"sent_count": sent_count})
+        return f"✅ Successfully sent reminders to **{sent_count}** engineers."
 
 class SavePreferencesCommand(Command):
     def __init__(self):
@@ -765,7 +993,11 @@ if __name__ == "__main__":
     bot.add_command(Step2PreferencesCommand())
     bot.add_command(SavePreferencesCommand())
     bot.add_command(OptOutCommand())
-
+    bot.add_command(MyPreferencesCommand())
+    bot.add_command(MyShiftsCommand())
+    bot.add_command(WhoIsWorkingCommand())
+    bot.add_command(PendingStatusCommand())
+    bot.add_command(SendRemindersNowCommand())
     scheduler = BackgroundScheduler()
     scheduler.add_job(send_admin_digest, "cron", hour=9, minute=0)
     scheduler.add_job(nag_pending_engineers, "interval", hours=24)
