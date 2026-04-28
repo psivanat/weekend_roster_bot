@@ -1,19 +1,70 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="card">
-    <h1>Application Manual</h1>
-    <p class="subtitle">How the ShiftSync Algorithm Works</p>
-    
-    <h3>1. Priority Logic</h3>
-    <p>The algorithm assigns shifts based on a strict priority system:</p>
+<div class="card mb-4">
+    <h1>📘 Application Manual</h1>
+    <p class="subtitle">Understanding the ShiftSync Algorithm & Team Settings</p>
+</div>
+
+<div class="card mb-4">
+    <h3>1. How the Algorithm Works (The Engine)</h3>
+    <p>ShiftSync uses an advanced <strong>Dynamic Bottleneck Solver</strong> combined with a multi-tier <strong>Fairness Sorter</strong>. It does not schedule chronologically; instead, it acts like a human solving a puzzle:</p>
     <ul>
-        <li><strong>Fairness First:</strong> It ensures no single engineer works significantly more shifts than anyone else.</li>
-        <li><strong>Sat/Sun Balance:</strong> If an engineer works 2 or more shifts, it attempts to give them at least one Saturday and one Sunday.</li>
-        <li><strong>7-Day Rule:</strong> It actively avoids scheduling an engineer on a Sunday and the immediately following Saturday.</li>
-        <li><strong>Preferences:</strong> It tries to assign engineers to the dates they ranked highest in their availability list.</li>
+        <li><strong>Dynamic Bottlenecking:</strong> It scans the entire month, finds the specific day that is hardest to fill (fewest available engineers), and solves that day first. It recalculates this at every step.</li>
+        <li><strong>Fairness First (Current Month):</strong> It prioritizes engineers who currently have the fewest shifts assigned this month to ensure an even spread.</li>
+        <li><strong>Historical Balance:</strong> <em>(If enabled)</em> It acts as a tie-breaker by prioritizing engineers who worked the fewest shifts over the past <em>X</em> months.</li>
+        <li><strong>Sat/Sun Balance:</strong> It actively tries to ensure engineers get an even mix of Saturdays and Sundays.</li>
+        <li><strong>Flexibility Reward:</strong> It prioritizes engineers who provided <em>more</em> available dates. Inflexible engineers cannot "steal" prime shifts from flexible team members.</li>
+        <li><strong>Preference Rank:</strong> It respects the exact order (Priority 1, Priority 2, etc.) the engineer submitted via Webex.</li>
+    </ul>
+</div>
+
+<div class="card mb-4">
+    <h3>2. Customizing Rules (Team Settings)</h3>
+    <p>Team Admins can strictly control the algorithm's boundaries by navigating to the <strong>Team Settings</strong> page. Changes take effect immediately on the next algorithm run.</p>
+    
+    <h5 class="mt-3">🛡️ Algorithm Constraints (Hard Rules)</h5>
+    <ul>
+        <li><strong>Strict 7-Day Rest:</strong> 
+            <br><em>If Checked:</em> An engineer working Sunday is strictly forbidden from being assigned to the very next Saturday (ensuring a full 6-day break).
+            <br><em>If Unchecked:</em> The algorithm avoids back-to-back weekends but is allowed to assign them if it's the only way to fill the roster.
+        </li>
+        <li><strong>Allow Same Weekend Shifts:</strong> 
+            <br><em>If Checked:</em> Engineers can be assigned to work <em>both</em> Saturday and Sunday of the exact same weekend.
+            <br><em>If Unchecked:</em> Strictly limits engineers to a maximum of 1 shift per weekend.
+        </li>
     </ul>
 
-    <h3>2. Leave Blockouts</h3>
-    <p>If an engineer is added to the <strong>Leave Blockouts</strong> list on the Availability page, the algorithm will absolutely ignore them for that date, even if they accidentally submitted it in their preferences.</p>
+    <h5 class="mt-3">⚖️ Historical Fairness</h5>
+    <ul>
+        <li><strong>Balance Historical Shifts:</strong> When enabled, the algorithm looks back into the database. If two engineers both need a shift this month, the shift goes to the engineer who worked less in the past.</li>
+        <li><strong>Months to look back (1-12):</strong> Defines the historical window (e.g., counting all shifts worked in the last 3 months).</li>
+    </ul>
+</div>
+
+<div class="card mb-4">
+    <h3>3. Leave Blockouts</h3>
+    <p>If an engineer is added to the <strong>Leave Blockouts</strong> list on the Availability page, the algorithm will absolutely ignore them for that date, even if they accidentally submitted it in their preferences. This is a strict hard constraint.</p>
+</div>
+
+<div class="card">
+    <h3>4. Smart Diagnostics & Troubleshooting</h3>
+    <p>ShiftSync is designed to fail safely. If a perfect roster is mathematically impossible (due to lack of availability or overly strict rules), it will not force-assign engineers to days they didn't prefer.</p>
+    <p>Instead, it tracks its own calculations and provides a <strong>Smart Diagnostic Error</strong> telling you exactly which day caused the failure and why.</p>
+    
+    <div style="background-color: #f8f9fa; padding: 15px; border-left: 4px solid #dc3545; border-radius: 4px; margin-top: 10px;">
+        <strong>Example Error:</strong><br>
+        🚨 Critical Bottleneck: 2026-05-16 (Saturday)<br>
+        Not enough engineers available.<br>
+        • 2 engineers were blocked by the 'Same Weekend' rule.<br>
+        • 1 engineer maxed out their shifts.<br>
+        <em>Suggestion: Ask engineers to add this date, or relax the constraints in Team Settings.</em>
+    </div>
+    
+    <h5 class="mt-3">How to resolve bottlenecks:</h5>
+    <ol>
+        <li><strong>Check Team Settings:</strong> Temporarily allow "Same Weekend Shifts" or disable "Strict 7-Day Rest" to see if the roster generates.</li>
+        <li><strong>Increase Max Shifts:</strong> Ensure engineers have a high enough <code>max_shifts</code> limit to cover the month's requirements.</li>
+        <li><strong>Targeted Broadcasts:</strong> Use the error message to know exactly which date is failing, and ask the team via Webex to specifically volunteer for that exact date.</li>
+    </ol>
 </div>
 {% endblock %}
