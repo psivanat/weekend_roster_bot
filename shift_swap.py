@@ -4,6 +4,10 @@ from datetime import datetime, timedelta, timezone
 from webex_bot.models.command import Command
 from webex_bot.models.response import Response
 from audit_logger import audit_log
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Use your existing DB config
 DB_PARAMS = {
