@@ -8,7 +8,6 @@ from webex_bot.webex_bot import WebexBot
 from webex_bot.models.command import Command
 from webex_bot.models.response import Response
 from audit_logger import audit_log
-reuse DB_PARAMS
 
 load_dotenv()
 
