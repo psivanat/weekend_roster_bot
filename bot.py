@@ -407,7 +407,7 @@ class Step2PreferencesCommand(Command):
         preferred_count = int(inputs.get("preferred_count", 2))
         min_required = preferred_count + 2
 
-        # Use target_month from card if present (from GUI broadcast), else fallback to next month
+        # Use target_month from card if present, else fallback to next month
         target_month = inputs.get("target_month")
         if target_month:
             y, m = map(int, target_month.split("-"))
@@ -463,6 +463,20 @@ class Step2PreferencesCommand(Command):
                 ]
             }
         }
+
+        # --- AUDIT LOGGING (Safe placement after variables are defined) ---
+        sender = activity.get("actor", {}).get("emailAddress") or activity.get("personEmail")
+        eng = get_engineer_by_email(sender)
+        if eng:
+            bot_audit(
+                action="BOT_PREF_STEP2_OPEN", 
+                team_id=eng[2], 
+                target_month=target_month,
+                entity_type="preferences", 
+                entity_id=eng[0],
+                details={"preferred_count": preferred_count, "min_required": min_required}
+            )
+        # ------------------------------------------------------------------
 
         r = Response()
         r.text = "Preference Step 2"
