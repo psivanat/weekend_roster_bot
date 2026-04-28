@@ -7,6 +7,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from webex_bot.webex_bot import WebexBot
 from webex_bot.models.command import Command
 from webex_bot.models.response import Response
+from shift_swap import UnableToWorkCommand, SubmitReliefRequestCommand, ReliefResponseCommand, tick_relief_timers
 from audit_logger import audit_log
 
 load_dotenv()
@@ -391,6 +392,7 @@ class HelloCommand(Command):
             {"type": "Action.Submit", "title": f"📝 Update Preferences ({display_month})", "data": {"callback_keyword": "step1_preferences"}},
             {"type": "Action.Submit", "title": "🔍 View My Submitted Preferences", "data": {"callback_keyword": "my_preferences"}},
             {"type": "Action.Submit", "title": "📆 View My Upcoming Shifts", "data": {"callback_keyword": "my_shifts"}}
+            {"type": "Action.Submit", "title": "🚨 Unable to Work (Request Relief)", "data": {"callback_keyword": "unable_to_work"}}
         ]
 
         body.append({"type": "ActionSet", "actions": actions})
@@ -998,10 +1000,14 @@ if __name__ == "__main__":
     bot.add_command(WhoIsWorkingCommand())
     bot.add_command(PendingStatusCommand())
     bot.add_command(SendRemindersNowCommand())
+    bot.add_command(UnableToWorkCommand())
+    bot.add_command(SubmitReliefRequestCommand())
+    bot.add_command(ReliefResponseCommand())
     scheduler = BackgroundScheduler()
     scheduler.add_job(send_admin_digest, "cron", hour=9, minute=0)
     scheduler.add_job(nag_pending_engineers, "interval", hours=24)
     scheduler.add_job(send_friday_shift_reminders, "interval", minutes=15)
+    scheduler.add_job(tick_relief_timers, "interval", minutes=5)
     scheduler.start()
 
     print("Bot started with scheduler.")

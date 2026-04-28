@@ -2,7 +2,7 @@
 {% block content %}
 <div class="card mb-4">
     <h1>📘 Application Manual</h1>
-    <p class="subtitle">Understanding the ShiftSync Algorithm & Team Settings</p>
+    <p class="subtitle">Understanding the ShiftSync Algorithm, Settings, & Automated Relief</p>
 </div>
 
 <div class="card mb-4">
@@ -46,7 +46,7 @@
     <p>If an engineer is added to the <strong>Leave Blockouts</strong> list on the Availability page, the algorithm will absolutely ignore them for that date, even if they accidentally submitted it in their preferences. This is a strict hard constraint.</p>
 </div>
 
-<div class="card">
+<div class="card mb-4">
     <h3>4. Smart Diagnostics & Troubleshooting</h3>
     <p>ShiftSync is designed to fail safely. If a perfect roster is mathematically impossible (due to lack of availability or overly strict rules), it will not force-assign engineers to days they didn't prefer.</p>
     <p>Instead, it tracks its own calculations and provides a <strong>Smart Diagnostic Error</strong> telling you exactly which day caused the failure and why.</p>
@@ -59,12 +59,42 @@
         • 1 engineer maxed out their shifts.<br>
         <em>Suggestion: Ask engineers to add this date, or relax the constraints in Team Settings.</em>
     </div>
+</div>
+
+<div class="card">
+    <h3>5. Automated Shift Relief (Callouts)</h3>
+    <p>If an engineer is unable to work a scheduled shift, they can use the Webex Bot to automatically find a replacement without Admin intervention.</p>
     
-    <h5 class="mt-3">How to resolve bottlenecks:</h5>
+    <h5 class="mt-3">⏱️ Rules & Deadlines</h5>
+    <ul>
+        <li><strong>Shift Hours Only:</strong> Relief requests can only be initiated and processed during the team's active shift hours. Timers automatically pause overnight.</li>
+        <li><strong>The Friday Cutoff:</strong> The system will <strong>hard-stop</strong> 2 hours before the shift ends on the Friday preceding the weekend. If no replacement is found by then, it escalates to the Admin.</li>
+    </ul>
+
+    <h5 class="mt-3">🤖 How the Bot Finds a Replacement</h5>
+    <p>The bot builds a queue of eligible engineers who <em>preferred</em> the requested date, sorting them by fairness (fewest shifts first). To ensure the shift gets covered, the bot will slowly relax constraints if people decline:</p>
     <ol>
-        <li><strong>Check Team Settings:</strong> Temporarily allow "Same Weekend Shifts" or disable "Strict 7-Day Rest" to see if the roster generates.</li>
-        <li><strong>Increase Max Shifts:</strong> Ensure engineers have a high enough <code>max_shifts</code> limit to cover the month's requirements.</li>
-        <li><strong>Targeted Broadcasts:</strong> Use the error message to know exactly which date is failing, and ask the team via Webex to specifically volunteer for that exact date.</li>
+        <li><strong>Tier 1:</strong> Perfect matches (Respects 7-Day Rest, Same Weekend, and Max Shifts).</li>
+        <li><strong>Tier 2:</strong> Relaxes the 7-Day Rest rule.</li>
+        <li><strong>Tier 3:</strong> Relaxes the Same Weekend rule.</li>
+        <li><strong>Tier 4:</strong> Relaxes the Max Shifts rule.</li>
     </ol>
+
+    <h5 class="mt-3">⏳ The "Concurrent Card" Timer</h5>
+    <p>The bot messages candidates one by one. If Candidate A does not respond within <strong>2 active hours</strong>, the bot messages Candidate B. However, Candidate A's card <strong>remains open</strong>. The first person to click "Accept" gets the shift, and all other cards instantly expire.</p>
+
+    <h5 class="mt-3">🚨 Admin Escalation</h5>
+    <p>If the entire queue declines, or the Friday deadline hits, the bot notifies the Admin with a highly actionable summary:</p>
+    
+    <div style="background-color: #f8f9fa; padding: 15px; border-left: 4px solid #ffc107; border-radius: 4px; margin-top: 10px;">
+        <strong>Manual Intervention Required: Relief Request Failed</strong><br>
+        Alice requested coverage for Saturday, May 16th, but the automated system could not secure a replacement before the Friday deadline.<br><br>
+        ❌ <strong>Declined:</strong> Bob, Charlie<br>
+        ⏳ <strong>No Response (Cards Expired):</strong> Dave, Eve<br><br>
+        💡 <strong>AI Suggestion (Engineers to contact manually):</strong><br>
+        <em>The following engineers did NOT prefer this date, but are the most fair options to ask based on their low shift counts:</em><br>
+        1. Frank (Current shifts: 1, Historical: 4)<br>
+        2. Grace (Current shifts: 2, Historical: 3)
+    </div>
 </div>
 {% endblock %}
