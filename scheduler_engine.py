@@ -1,5 +1,6 @@
 import os
 import psycopg2
+from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import calendar
@@ -19,12 +20,25 @@ DB_PARAMS = {
 
 def fetch_team_settings(team_id):
     conn = psycopg2.connect(**DB_PARAMS)
-    cursor = conn.cursor()
-    cursor.execute("SELECT sat_coverage, sun_coverage, min_preferences FROM teams WHERE id = %s", (team_id,))
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("""
+        SELECT sat_coverage, sun_coverage, min_preferences, 
+               strict_7_day_rest, allow_same_weekend 
+        FROM teams WHERE id = %s
+    """, (team_id,))
     res = cursor.fetchone()
     cursor.close()
     conn.close()
-    return {"sat_coverage": res[0], "sun_coverage": res[1], "min_preferences": res[2]}
+    
+    if not res:
+        return {"sat_coverage": 1, "sun_coverage": 1, "strict_7_day_rest": False, "allow_same_weekend": False}
+        
+    return {
+        "sat_coverage": res["sat_coverage"], 
+        "sun_coverage": res["sun_coverage"], 
+        "strict_7_day_rest": res["strict_7_day_rest"] or False,
+        "allow_same_weekend": res["allow_same_weekend"] or False
+    }
 
 def fetch_data_from_db(year, month, weekend_dates, team_id):
     year_month = f"{year}-{month:02d}"
@@ -38,8 +52,6 @@ def fetch_data_from_db(year, month, weekend_dates, team_id):
     conn = psycopg2.connect(**DB_PARAMS)
     cursor = conn.cursor()
 
-    # Source of truth for eligibility: preferences table
-    # Hard cap for assignments: engineers.max_shifts
     cursor.execute("""
         SELECT e.id, e.name, e.max_shifts, p.priority_dates
         FROM preferences p
@@ -55,20 +67,13 @@ def fetch_data_from_db(year, month, weekend_dates, team_id):
 
     for eng_id, name, max_shifts, priority_dates in eligible_rows:
         engineers.append(name)
-
-        # Enforce hard per-engineer cap from engineers table
         eng_max_shifts[name] = max_shifts if max_shifts is not None else 0
-
-        # Keep ranked order from date[]; filter to weekends in the target month
         pref_dates = [d.strftime('%Y-%m-%d') for d in (priority_dates or [])]
         availability[name] = [d for d in pref_dates if d in weekend_set]
 
-        # Leave blockouts
         cursor.execute("""
-            SELECT block_date
-            FROM leave_blockouts
-            WHERE engineer_id = %s
-              AND TO_CHAR(block_date, 'YYYY-MM') = %s
+            SELECT block_date FROM leave_blockouts
+            WHERE engineer_id = %s AND TO_CHAR(block_date, 'YYYY-MM') = %s
         """, (eng_id, year_month))
         eng_leaves[name] = [row[0].strftime('%Y-%m-%d') for row in cursor.fetchall()]
 
@@ -93,9 +98,7 @@ def fetch_boundary_roster(year, month, team_id):
     boundary_roster = {}
     for row in cursor.fetchall():
         date_str = row[0].strftime('%Y-%m-%d')
-        if date_str not in boundary_roster:
-            boundary_roster[date_str] = []
-        boundary_roster[date_str].append(row[1])
+        boundary_roster.setdefault(date_str, []).append(row[1])
 
     cursor.close()
     conn.close()
@@ -134,192 +137,147 @@ def get_same_weekend_day(date_str):
         return (dt - timedelta(days=1)).strftime("%Y-%m-%d")
     return None
 
-def count_7_day_violations(roster):
-    violations = 0
-    for d in sorted(roster.keys()):
-        if day_name(d) == "Sunday":
-            next_sat = (datetime.strptime(d, "%Y-%m-%d") + timedelta(days=6)).strftime("%Y-%m-%d")
-            if next_sat in roster:
-                violations += len(set(roster[d]).intersection(set(roster[next_sat])))
-    return violations
-
-def evaluate_solution(solution, availability):
-    active_engs = [e for e, dates in availability.items() if len(dates) > 0]
-    if not active_engs:
-        return 0, 0, 0, 0
-    shifts = [solution["shifts_count"][e] for e in active_engs]
-    spread = max(shifts) - min(shifts)
-    unbalanced = sum(
-        1 for e in active_engs
-        if solution["shifts_count"][e] >= 2 and
-        (solution["saturday_count"][e] == 0 or solution["sunday_count"][e] == 0)
-    )
-    seven_day = count_7_day_violations(solution["roster"])
-    pref_score = sum(
-        availability[e].index(day)
-        for day, assigned_engs in solution["roster"].items()
-        for e in assigned_engs
-        if day in availability[e]
-    )
-    return (spread, unbalanced, seven_day, pref_score)
-
 def draft_roster(availability, eng_max_shifts, eng_leaves, weekend_dates, settings, boundary_roster, seed=42, timeout_seconds=10):
     rng = random.Random(seed)
     engineers = sorted(availability.keys())
-    day_avail_counts = {
-        d: sum(1 for e in engineers if d in availability.get(e, []) and d not in eng_leaves.get(e, []))
-        for d in weekend_dates
-    }
-    sorted_days = sorted(weekend_dates, key=lambda d: day_avail_counts[d])
-
+    
     roster = copy.deepcopy(boundary_roster)
     for d in weekend_dates:
-        roster[d] = []
+        if d not in roster:
+            roster[d] = []
 
     shifts_count = {e: 0 for e in engineers}
     saturday_count = {e: 0 for e in engineers}
     sunday_count = {e: 0 for e in engineers}
 
     start_time = time.time()
-    valid_solutions = []
+    
+    # Tracker for smart error messages
+    bottleneck_tracker = {"day": None, "reason": None, "max_depth": -1}
 
-    def solve(day_idx):
-        if time.time() - start_time > timeout_seconds:
-            if valid_solutions:
-                return True
-            raise TimeoutError(f"Timed out after {timeout_seconds}s. No valid combinations found.")
-
-        if day_idx == len(sorted_days):
-            valid_solutions.append({
-                "roster": copy.deepcopy(roster),
-                "shifts_count": shifts_count.copy(),
-                "saturday_count": saturday_count.copy(),
-                "sunday_count": sunday_count.copy()
-            })
-            return len(valid_solutions) >= 50
-
-        current_day = sorted_days[day_idx]
+    def get_valid_candidates(current_day, current_roster, current_shifts):
         is_sat = day_name(current_day) == "Saturday"
-        needed = settings['sat_coverage'] if is_sat else settings['sun_coverage']
-
         candidates = []
+        blocked_reasons = {"max_shifts": [], "same_weekend": [], "7_day_rest": []}
+
         for e in engineers:
             if current_day not in availability.get(e, []):
                 continue
             if current_day in eng_leaves.get(e, []):
                 continue
-            # max_shifts constraint enforced here
-            if shifts_count[e] >= eng_max_shifts.get(e, 0):
+            
+            # 1. Hard Cap Check
+            if current_shifts[e] >= eng_max_shifts.get(e, 0):
+                blocked_reasons["max_shifts"].append(e)
                 continue
 
-            same_weekend_day = get_same_weekend_day(current_day)
-            if same_weekend_day in roster and e in roster[same_weekend_day]:
-                continue
+            # 2. Configurable Toggle: Same Weekend
+            if not settings.get('allow_same_weekend', False):
+                same_weekend_day = get_same_weekend_day(current_day)
+                if same_weekend_day in current_roster and e in current_roster[same_weekend_day]:
+                    blocked_reasons["same_weekend"].append(e)
+                    continue
+
+            # 3. Configurable Toggle: Strict 7-Day Rest
+            if settings.get('strict_7_day_rest', False):
+                if is_sat:
+                    prev_sun = (datetime.strptime(current_day, "%Y-%m-%d") - timedelta(days=6)).strftime("%Y-%m-%d")
+                    if prev_sun in current_roster and e in current_roster[prev_sun]:
+                        blocked_reasons["7_day_rest"].append(e)
+                        continue
+                else:
+                    next_sat = (datetime.strptime(current_day, "%Y-%m-%d") + timedelta(days=6)).strftime("%Y-%m-%d")
+                    if next_sat in current_roster and e in current_roster[next_sat]:
+                        blocked_reasons["7_day_rest"].append(e)
+                        continue
 
             candidates.append(e)
+        return candidates, blocked_reasons
 
+    def solve(depth):
+        if time.time() - start_time > timeout_seconds:
+            raise TimeoutError("Algorithm timed out.")
+
+        # DYNAMIC MRV: Find the unassigned day with the fewest valid candidates
+        unassigned_days = []
+        for d in weekend_dates:
+            needed = settings['sat_coverage'] if day_name(d) == "Saturday" else settings['sun_coverage']
+            if len(roster[d]) < needed:
+                cands, reasons = get_valid_candidates(d, roster, shifts_count)
+                unassigned_days.append((d, needed - len(roster[d]), cands, reasons))
+
+        # If all days are filled, we are done!
+        if not unassigned_days:
+            return True
+
+        # Sort by fewest candidates available (solve the hardest puzzle piece first)
+        unassigned_days.sort(key=lambda x: len(x[2]))
+        current_day, needed_now, candidates, blocked_reasons = unassigned_days[0]
+
+        # Track bottlenecks if we are stuck
+        if len(candidates) < needed_now:
+            if depth > bottleneck_tracker["max_depth"]:
+                bottleneck_tracker["max_depth"] = depth
+                bottleneck_tracker["day"] = current_day
+                bottleneck_tracker["reason"] = blocked_reasons
+            return False
+
+        is_sat = day_name(current_day) == "Saturday"
+
+        # FAIRNESS SORTER
         def candidate_sort_key(e):
-            causes_7_day = 0
-            if is_sat:
-                prev_sun = (datetime.strptime(current_day, "%Y-%m-%d") - timedelta(days=6)).strftime("%Y-%m-%d")
-                if prev_sun in roster and e in roster[prev_sun]:
-                    causes_7_day = 1
-            else:
-                next_sat = (datetime.strptime(current_day, "%Y-%m-%d") + timedelta(days=6)).strftime("%Y-%m-%d")
-                if next_sat in roster and e in roster[next_sat]:
-                    causes_7_day = 1
-
+            # 1. Spread shifts evenly
+            # 2. Balance Sat vs Sun
+            # 3. Reward flexibility (people who gave more dates get priority)
+            # 4. Respect their ranked preference
             return (
-                shifts_count[e],
-                1 if (saturday_count[e] > 0 if is_sat else sunday_count[e] > 0) else 0,
-                causes_7_day,
+                shifts_count[e], 
+                saturday_count[e] if is_sat else sunday_count[e], 
+                -len(availability.get(e, [])), 
                 availability[e].index(current_day),
-                len(availability.get(e, [])),
                 rng.random()
             )
 
         candidates.sort(key=candidate_sort_key)
 
-        if len(candidates) < needed:
-            return False
-
-        for combo in itertools.combinations(candidates, needed):
+        for combo in itertools.combinations(candidates, needed_now):
+            # Apply assignments
             for e in combo:
                 shifts_count[e] += 1
-                if is_sat:
-                    saturday_count[e] += 1
-                else:
-                    sunday_count[e] += 1
+                if is_sat: saturday_count[e] += 1
+                else: sunday_count[e] += 1
                 roster[current_day].append(e)
 
-            if solve(day_idx + 1):
+            # Recurse
+            if solve(depth + 1):
                 return True
 
+            # Backtrack
             for e in combo:
                 shifts_count[e] -= 1
-                if is_sat:
-                    saturday_count[e] -= 1
-                else:
-                    sunday_count[e] -= 1
+                if is_sat: saturday_count[e] -= 1
+                else: sunday_count[e] -= 1
                 roster[current_day].remove(e)
 
         return False
 
-    solve(0)
-
-    if not valid_solutions:
-        raise ValueError("Unable to find a valid roster satisfying all constraints.")
-
-    valid_solutions.sort(key=lambda sol: evaluate_solution(sol, availability))
-    best_solution = valid_solutions[0]
-    final_roster = {d: best_solution["roster"][d] for d in weekend_dates}
-    return final_roster, 0
-
-def get_smart_suggestion(engineers, availability, eng_max_shifts, eng_leaves, weekend_dates, settings):
-    lowest_margin = 999
-    bottleneck_day = None
-
-    for d in weekend_dates:
-        needed = settings['sat_coverage'] if day_name(d) == "Saturday" else settings['sun_coverage']
-        avail_count = sum(1 for e in engineers if d in availability.get(e, []) and d not in eng_leaves.get(e, []))
-        margin = avail_count - needed
-
-        if margin < lowest_margin:
-            lowest_margin = margin
-            bottleneck_day = d
-
-    if bottleneck_day:
-        potential_helpers = [
-            e for e in engineers
-            if bottleneck_day not in availability.get(e, [])
-            and bottleneck_day not in eng_leaves.get(e, [])
-            and eng_max_shifts.get(e, 0) > 0
-        ]
-        if potential_helpers:
-            helpers_str = ", ".join(potential_helpers[:3])
-            return f"💡 AI Suggestion: {bottleneck_day} ({day_name(bottleneck_day)}) is critically understaffed. Ask {helpers_str} to add this date to their availability."
-
-    return "💡 AI Suggestion: Try reducing required coverage in Team Settings, or increasing Max Shifts for engineers."
+    if solve(0):
+        final_roster = {d: roster[d] for d in weekend_dates}
+        return final_roster, None
+    else:
+        return None, bottleneck_tracker
 
 def generate_monthly_roster(year, month, team_id, seed=42):
     year_month = f"{year}-{month:02d}"
-    engineers, availability, eng_max_shifts, eng_leaves, weekend_dates, settings = [], {}, {}, {}, [], {}
     conn_audit = None
 
     try:
         conn_audit = psycopg2.connect(**DB_PARAMS)
 
-        # START log
         audit_log(
-            conn=conn_audit,
-            source="scheduler",
-            action="RUN_ALGORITHM_START",
-            status="success",
-            team_id=team_id,
-            target_month=year_month,
-            entity_type="roster_assignments",
-            entity_id=year_month,
-            details={"year": year, "month": month, "seed": seed}
+            conn=conn_audit, source="scheduler", action="RUN_ALGORITHM_START", status="success",
+            team_id=team_id, target_month=year_month, entity_type="roster_assignments",
+            entity_id=year_month, details={"year": year, "month": month, "seed": seed}
         )
         conn_audit.commit()
 
@@ -329,105 +287,51 @@ def generate_monthly_roster(year, month, team_id, seed=42):
         boundary_roster = fetch_boundary_roster(year, month, team_id)
 
         if not engineers:
-            msg = "No active engineers found for this team."
-            audit_log(
-                conn=conn_audit,
-                source="scheduler",
-                action="RUN_ALGORITHM_FAILED",
-                status="failed",
-                team_id=team_id,
-                target_month=year_month,
-                entity_type="roster_assignments",
-                entity_id=year_month,
-                details={"reason": "no_eligible_engineers"},
-                error_message=msg
-            )
+            msg = "No active engineers found with submitted preferences."
+            audit_log(conn=conn_audit, source="scheduler", action="RUN_ALGORITHM_FAILED", status="failed", team_id=team_id, target_month=year_month, error_message=msg)
             conn_audit.commit()
             return {"success": False, "message": msg}
 
-        # Capacity Check
-        total_needed = (
-            len([d for d in weekend_dates if day_name(d) == "Saturday"]) * settings['sat_coverage'] +
-            len([d for d in weekend_dates if day_name(d) == "Sunday"]) * settings['sun_coverage']
-        )
-        total_capacity = sum(eng_max_shifts.values())
-
-        if total_capacity < total_needed:
-            suggestion = get_smart_suggestion(engineers, availability, eng_max_shifts, eng_leaves, weekend_dates, settings)
-            msg = f"Insufficient capacity. Needed: {total_needed}, Max Capacity: {total_capacity}.<br><br>{suggestion}"
-
-            audit_log(
-                conn=conn_audit,
-                source="scheduler",
-                action="RUN_ALGORITHM_FAILED",
-                status="failed",
-                team_id=team_id,
-                target_month=year_month,
-                entity_type="roster_assignments",
-                entity_id=year_month,
-                details={
-                    "reason": "insufficient_capacity",
-                    "total_needed": total_needed,
-                    "total_capacity": total_capacity
-                },
-                error_message="insufficient_capacity"
-            )
-            conn_audit.commit()
-            return {"success": False, "message": msg}
-
-        roster, _ = draft_roster(
+        # Run the Dynamic Engine
+        roster, bottleneck = draft_roster(
             availability, eng_max_shifts, eng_leaves,
             weekend_dates, settings, boundary_roster, seed, 10
         )
-        save_roster_to_db(roster, team_id)
 
-        total_assigned = sum(len(v) for v in roster.values())
+        if roster:
+            save_roster_to_db(roster, team_id)
+            total_assigned = sum(len(v) for v in roster.values())
+            audit_log(
+                conn=conn_audit, source="scheduler", action="RUN_ALGORITHM_SUCCESS", status="success",
+                team_id=team_id, target_month=year_month, details={"total_assigned": total_assigned}
+            )
+            conn_audit.commit()
+            return {"success": True, "message": "Roster successfully generated and saved!"}
+        else:
+            # Smart Error Generation based on tracked bottleneck
+            bad_day = bottleneck["day"]
+            reasons = bottleneck["reason"]
+            msg = f"Algorithm failed to find a valid combination. <br><br><b>🚨 Critical Bottleneck: {bad_day} ({day_name(bad_day)})</b><br>"
+            msg += f"Not enough engineers available. "
+            
+            if reasons["same_weekend"]:
+                msg += f"<br>• <b>{len(reasons['same_weekend'])}</b> engineers were blocked by the 'Same Weekend' rule."
+            if reasons["7_day_rest"]:
+                msg += f"<br>• <b>{len(reasons['7_day_rest'])}</b> engineers were blocked by the '7-Day Rest' rule."
+            if reasons["max_shifts"]:
+                msg += f"<br>• <b>{len(reasons['max_shifts'])}</b> engineers maxed out their shifts."
+                
+            msg += "<br><br><i>Suggestion: Ask engineers to add this date, or relax the constraints in Team Settings.</i>"
 
-        # SUCCESS log
-        audit_log(
-            conn=conn_audit,
-            source="scheduler",
-            action="RUN_ALGORITHM_SUCCESS",
-            status="success",
-            team_id=team_id,
-            target_month=year_month,
-            entity_type="roster_assignments",
-            entity_id=year_month,
-            details={
-                "total_needed": total_needed,
-                "total_capacity": total_capacity,
-                "total_assigned": total_assigned,
-                "weekend_days": len(weekend_dates),
-                "eligible_engineers": len(engineers)
-            }
-        )
-        conn_audit.commit()
-
-        return {"success": True, "message": "Roster successfully generated and saved!"}
+            audit_log(conn=conn_audit, source="scheduler", action="RUN_ALGORITHM_FAILED", status="failed", team_id=team_id, target_month=year_month, error_message="bottleneck_hit")
+            conn_audit.commit()
+            return {"success": False, "message": msg}
 
     except Exception as e:
-        suggestion = get_smart_suggestion(engineers, availability, eng_max_shifts, eng_leaves, weekend_dates, settings) if weekend_dates else ""
-
-        try:
-            if conn_audit:
-                audit_log(
-                    conn=conn_audit,
-                    source="scheduler",
-                    action="RUN_ALGORITHM_FAILED",
-                    status="failed",
-                    team_id=team_id,
-                    target_month=year_month,
-                    entity_type="roster_assignments",
-                    entity_id=year_month,
-                    details={"seed": seed},
-                    error_message=str(e)
-                )
-                conn_audit.commit()
-        except Exception:
-            pass
-
-        return {"success": False, "message": f"Algorithm failed to find a valid combination: {e}<br><br>{suggestion}"}
-
+        if conn_audit:
+            audit_log(conn=conn_audit, source="scheduler", action="RUN_ALGORITHM_FAILED", status="failed", team_id=team_id, target_month=year_month, error_message=str(e))
+            conn_audit.commit()
+        return {"success": False, "message": f"System Error: {str(e)}"}
     finally:
         if conn_audit:
             conn_audit.close()

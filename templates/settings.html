@@ -30,6 +30,25 @@
                 <h3>Rules</h3>
                 <label>Minimum Preferences Required</label>
                 <input type="number" name="min_preferences" value="{{ settings.min_preferences }}" min="0" required>
+                
+                <!-- NEW: Algorithm Constraint Toggles -->
+                <div style="margin-top: 20px;">
+                    <label style="display: flex; align-items: center; gap: 8px; font-weight: bold; cursor: pointer;">
+                        <input type="checkbox" name="strict_7_day_rest" {% if settings.strict_7_day_rest %}checked{% endif %} style="width: auto; margin: 0;">
+                        Strict 7-Day Rest
+                    </label>
+                    <small style="display: block; color: #666; margin-bottom: 15px; margin-left: 22px;">
+                        Prevents working Sunday and then the very next Saturday.
+                    </small>
+                    
+                    <label style="display: flex; align-items: center; gap: 8px; font-weight: bold; cursor: pointer;">
+                        <input type="checkbox" name="allow_same_weekend" {% if settings.allow_same_weekend %}checked{% endif %} style="width: auto; margin: 0;">
+                        Allow Same Weekend Shifts
+                    </label>
+                    <small style="display: block; color: #666; margin-left: 22px;">
+                        Allows an engineer to be assigned to both Sat & Sun of the same weekend.
+                    </small>
+                </div>
             </div>
         </div>
         <button type="submit" class="btn" style="margin-top: 20px;">💾 Save Settings</button>

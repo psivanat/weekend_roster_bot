@@ -770,7 +770,7 @@ def manage_availability():
         selected_month=month
     )
 
-# ---------------- Settings / Analytics / Superadmin ----------------
+# ---------------- Team Settings / Analytics / Superadmin ----------------
 
 @app.route("/settings", methods=["GET", "POST"])
 @login_required
@@ -783,26 +783,76 @@ def settings():
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
-    if request.method == "POST":
-        cur.execute("""
-            UPDATE teams
-            SET sat_coverage=%s, sun_coverage=%s, min_preferences=%s, shift_start_time=%s, shift_end_time=%s
-            WHERE id=%s
-        """, (
-            request.form.get("sat_coverage"),
-            request.form.get("sun_coverage"),
-            request.form.get("min_preferences"),
-            request.form.get("shift_start_time"),
-            request.form.get("shift_end_time"),
-            team_id
-        ))
-        conn.commit()
-        flash("Team settings updated.", "success")
+    try:
+        if request.method == "POST":
+            # Extract existing fields
+            sat_coverage = request.form.get("sat_coverage")
+            sun_coverage = request.form.get("sun_coverage")
+            min_preferences = request.form.get("min_preferences")
+            shift_start_time = request.form.get("shift_start_time") or None
+            shift_end_time = request.form.get("shift_end_time") or None
+            
+            # NEW: Extract boolean toggles (checkboxes)
+            # If a checkbox is unchecked, it isn't sent in request.form
+            strict_7_day_rest = 'strict_7_day_rest' in request.form
+            allow_same_weekend = 'allow_same_weekend' in request.form
 
-    cur.execute("SELECT * FROM teams WHERE id=%s", (team_id,))
-    team_settings = cur.fetchone()
-    cur.close()
-    conn.close()
+            cur.execute("""
+                UPDATE teams
+                SET sat_coverage=%s, 
+                    sun_coverage=%s, 
+                    min_preferences=%s, 
+                    shift_start_time=%s, 
+                    shift_end_time=%s,
+                    strict_7_day_rest=%s,
+                    allow_same_weekend=%s
+                WHERE id=%s
+            """, (
+                sat_coverage,
+                sun_coverage,
+                min_preferences,
+                shift_start_time,
+                shift_end_time,
+                strict_7_day_rest,
+                allow_same_weekend,
+                team_id
+            ))
+
+            # Add Audit Log
+            audit_log(
+                conn=conn, source="gui", action="UPDATE_TEAM_SETTINGS", status="success",
+                team_id=team_id, entity_type="teams", entity_id=team_id,
+                details={
+                    "sat_coverage": sat_coverage,
+                    "sun_coverage": sun_coverage,
+                    "strict_7_day_rest": strict_7_day_rest,
+                    "allow_same_weekend": allow_same_weekend
+                }
+            )
+            
+            conn.commit()
+            flash("Team settings updated.", "success")
+
+        # GET: Fetch current settings
+        cur.execute("SELECT * FROM teams WHERE id=%s", (team_id,))
+        team_settings = cur.fetchone()
+
+    except Exception as ex:
+        conn.rollback()
+        try:
+            audit_log(
+                conn=conn, source="gui", action="UPDATE_TEAM_SETTINGS", status="failed",
+                team_id=team_id, entity_type="teams", entity_id=team_id,
+                error_message=str(ex)
+            )
+            conn.commit()
+        except Exception:
+            pass
+        flash(f"Error updating settings: {ex}", "error")
+        team_settings = {}
+    finally:
+        cur.close()
+        conn.close()
 
     return render_template("settings.html", settings=team_settings)
 
