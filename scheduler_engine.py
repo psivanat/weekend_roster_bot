@@ -18,6 +18,35 @@ DB_PARAMS = {
     "password": os.getenv("DB_PASS")
 }
 
+def fetch_team_settings(team_id):
+    conn = psycopg2.connect(**DB_PARAMS)
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("""
+        SELECT sat_coverage, sun_coverage, min_preferences, 
+               strict_7_day_rest, allow_same_weekend,
+               consider_historical_shifts, historical_months_count
+        FROM teams WHERE id = %s
+    """, (team_id,))
+    res = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    
+    if not res:
+        return {
+            "sat_coverage": 1, "sun_coverage": 1, 
+            "strict_7_day_rest": False, "allow_same_weekend": False,
+            "consider_historical_shifts": False, "historical_months_count": 1
+        }
+        
+    return {
+        "sat_coverage": res["sat_coverage"], 
+        "sun_coverage": res["sun_coverage"], 
+        "strict_7_day_rest": res["strict_7_day_rest"] or False,
+        "allow_same_weekend": res["allow_same_weekend"] or False,
+        "consider_historical_shifts": res["consider_historical_shifts"] or False,
+        "historical_months_count": res["historical_months_count"] or 1
+    }
+
 def fetch_historical_shift_counts(year, month, team_id, months_back):
     conn = psycopg2.connect(**DB_PARAMS)
     cursor = conn.cursor()
@@ -40,31 +69,6 @@ def fetch_historical_shift_counts(year, month, team_id, months_back):
     cursor.close()
     conn.close()
     return counts
-
-def fetch_team_settings(team_id):
-    conn = psycopg2.connect(**DB_PARAMS)
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute("""
-        SELECT sat_coverage, sun_coverage, min_preferences, 
-               strict_7_day_rest, allow_same_weekend,
-               consider_historical_shifts, historical_months_count
-        FROM teams WHERE id = %s
-    """, (team_id,))
-    res = cursor.fetchone()
-    cursor.close()
-    conn.close()
-    
-    if not res:
-        return {"sat_coverage": 1, "sun_coverage": 1, "strict_7_day_rest": False, "allow_same_weekend": False, "consider_historical_shifts": False, "historical_months_count": 1}
-        
-    return {
-        "sat_coverage": res["sat_coverage"], 
-        "sun_coverage": res["sun_coverage"], 
-        "strict_7_day_rest": res["strict_7_day_rest"] or False,
-        "allow_same_weekend": res["allow_same_weekend"] or False,
-        "consider_historical_shifts": res["consider_historical_shifts"] or False,
-        "historical_months_count": res["historical_months_count"] or 1
-    }
 
 def fetch_data_from_db(year, month, weekend_dates, team_id):
     year_month = f"{year}-{month:02d}"
@@ -116,11 +120,8 @@ def fetch_boundary_roster(year, month, team_id):
     
     start_bound = (first_day - timedelta(days=7)).strftime('%Y-%m-%d')
     end_bound = (last_day + timedelta(days=7)).strftime('%Y-%m-%d')
-    
-    # The formatted current month to exclude (e.g., '2026-05')
     current_month_str = f"{year}-{month:02d}"
 
-    # NEW: Added AND TO_CHAR(r.shift_date, 'YYYY-MM') != %s to exclude the current month
     cursor.execute("""
         SELECT shift_date, e.name FROM roster_assignments r
         JOIN engineers e ON r.engineer_id = e.id
@@ -133,9 +134,7 @@ def fetch_boundary_roster(year, month, team_id):
     boundary_roster = {}
     for row in cursor.fetchall():
         date_str = row[0].strftime('%Y-%m-%d')
-        if date_str not in boundary_roster:
-            boundary_roster[date_str] = []
-        boundary_roster[date_str].append(row[1])
+        boundary_roster.setdefault(date_str, []).append(row[1])
 
     cursor.close()
     conn.close()
@@ -147,13 +146,11 @@ def save_roster_to_db(roster, team_id, year, month):
     year_month = f"{year}-{month:02d}"
     
     try:
-        # 1. Delete the old roster for this month ONLY (happens inside the transaction)
         cursor.execute("""
             DELETE FROM roster_assignments 
             WHERE team_id = %s AND TO_CHAR(shift_date, 'YYYY-MM') = %s
         """, (team_id, year_month))
         
-        # 2. Insert the newly generated roster
         for date_str, assigned_names in roster.items():
             for name in assigned_names:
                 cursor.execute("SELECT id FROM engineers WHERE name = %s AND team_id = %s", (name, team_id))
@@ -163,12 +160,8 @@ def save_roster_to_db(roster, team_id, year, month):
                         "INSERT INTO roster_assignments (shift_date, team_id, engineer_id) VALUES (%s, %s, %s)",
                         (date_str, team_id, eng[0])
                     )
-                    
-        # 3. Commit the transaction (This safely swaps the old for the new instantly)
         conn.commit()
-        
     except Exception as e:
-        # If anything fails, cancel the deletion and keep the old roster!
         conn.rollback()
         raise e
     finally:
@@ -189,7 +182,7 @@ def get_same_weekend_day(date_str):
         return (dt - timedelta(days=1)).strftime("%Y-%m-%d")
     return None
 
-def draft_roster(availability, eng_max_shifts, eng_leaves, weekend_dates, settings, boundary_roster, seed=42, timeout_seconds=10):
+def draft_roster(availability, eng_max_shifts, eng_leaves, weekend_dates, settings, boundary_roster, historical_counts, seed=42, timeout_seconds=10):
     rng = random.Random(seed)
     engineers = sorted(availability.keys())
     
@@ -203,8 +196,6 @@ def draft_roster(availability, eng_max_shifts, eng_leaves, weekend_dates, settin
     sunday_count = {e: 0 for e in engineers}
 
     start_time = time.time()
-    
-    # Tracker for smart error messages
     bottleneck_tracker = {"day": None, "reason": None, "max_depth": -1}
 
     def get_valid_candidates(current_day, current_roster, current_shifts):
@@ -218,19 +209,16 @@ def draft_roster(availability, eng_max_shifts, eng_leaves, weekend_dates, settin
             if current_day in eng_leaves.get(e, []):
                 continue
             
-            # 1. Hard Cap Check
             if current_shifts[e] >= eng_max_shifts.get(e, 0):
                 blocked_reasons["max_shifts"].append(e)
                 continue
 
-            # 2. Configurable Toggle: Same Weekend
             if not settings.get('allow_same_weekend', False):
                 same_weekend_day = get_same_weekend_day(current_day)
                 if same_weekend_day in current_roster and e in current_roster[same_weekend_day]:
                     blocked_reasons["same_weekend"].append(e)
                     continue
 
-            # 3. Configurable Toggle: Strict 7-Day Rest
             if settings.get('strict_7_day_rest', False):
                 if is_sat:
                     prev_sun = (datetime.strptime(current_day, "%Y-%m-%d") - timedelta(days=6)).strftime("%Y-%m-%d")
@@ -250,7 +238,6 @@ def draft_roster(availability, eng_max_shifts, eng_leaves, weekend_dates, settin
         if time.time() - start_time > timeout_seconds:
             raise TimeoutError("Algorithm timed out.")
 
-        # DYNAMIC MRV: Find the unassigned day with the fewest valid candidates
         unassigned_days = []
         for d in weekend_dates:
             needed = settings['sat_coverage'] if day_name(d) == "Saturday" else settings['sun_coverage']
@@ -258,15 +245,12 @@ def draft_roster(availability, eng_max_shifts, eng_leaves, weekend_dates, settin
                 cands, reasons = get_valid_candidates(d, roster, shifts_count)
                 unassigned_days.append((d, needed - len(roster[d]), cands, reasons))
 
-        # If all days are filled, we are done!
         if not unassigned_days:
             return True
 
-        # Sort by fewest candidates available (solve the hardest puzzle piece first)
         unassigned_days.sort(key=lambda x: len(x[2]))
         current_day, needed_now, candidates, blocked_reasons = unassigned_days[0]
 
-        # Track bottlenecks if we are stuck
         if len(candidates) < needed_now:
             if depth > bottleneck_tracker["max_depth"]:
                 bottleneck_tracker["max_depth"] = depth
@@ -276,12 +260,11 @@ def draft_roster(availability, eng_max_shifts, eng_leaves, weekend_dates, settin
 
         is_sat = day_name(current_day) == "Saturday"
 
-        # FAIRNESS SORTER
         def candidate_sort_key(e):
             return (
-                shifts_count[e],                           # 1. Balance current month first (everyone gets 1, then 2, etc.)
-                historical_counts.get(e, 0),               # 2. TIE-BREAKER: Give priority to those with fewer historical shifts!
-                saturday_count[e] if is_sat else sunday_count[e], # 3. Balance Sat vs Sun
+                shifts_count[e],                           # 1. Balance current month first
+                historical_counts.get(e, 0),               # 2. TIE-BREAKER: Historical shifts
+                1 if (saturday_count[e] > 0 if is_sat else sunday_count[e] > 0) else 0, # 3. Balance Sat vs Sun
                 -len(availability.get(e, [])),             # 4. Reward flexibility
                 availability[e].index(current_day),        # 5. Respect preference rank
                 rng.random()                               # 6. Random tie-breaker
@@ -290,18 +273,15 @@ def draft_roster(availability, eng_max_shifts, eng_leaves, weekend_dates, settin
         candidates.sort(key=candidate_sort_key)
 
         for combo in itertools.combinations(candidates, needed_now):
-            # Apply assignments
             for e in combo:
                 shifts_count[e] += 1
                 if is_sat: saturday_count[e] += 1
                 else: sunday_count[e] += 1
                 roster[current_day].append(e)
 
-            # Recurse
             if solve(depth + 1):
                 return True
 
-            # Backtrack
             for e in combo:
                 shifts_count[e] -= 1
                 if is_sat: saturday_count[e] -= 1
@@ -341,10 +321,29 @@ def generate_monthly_roster(year, month, team_id, seed=42):
             conn_audit.commit()
             return {"success": False, "message": msg}
 
+        # Capacity Check
+        total_needed = (
+            len([d for d in weekend_dates if day_name(d) == "Saturday"]) * settings['sat_coverage'] +
+            len([d for d in weekend_dates if day_name(d) == "Sunday"]) * settings['sun_coverage']
+        )
+        total_capacity = sum(eng_max_shifts.values())
+
+        if total_capacity < total_needed:
+            msg = f"Insufficient capacity. Needed: {total_needed}, Max Capacity: {total_capacity}."
+            audit_log(conn=conn_audit, source="scheduler", action="RUN_ALGORITHM_FAILED", status="failed", team_id=team_id, target_month=year_month, error_message="insufficient_capacity")
+            conn_audit.commit()
+            return {"success": False, "message": msg}
+
+        # NEW: Fetch historical counts safely
+        historical_counts = {}
+        if settings.get("consider_historical_shifts"):
+            months_back = settings.get("historical_months_count", 1)
+            historical_counts = fetch_historical_shift_counts(year, month, team_id, months_back)
+
         # Run the Dynamic Engine
         roster, bottleneck = draft_roster(
             availability, eng_max_shifts, eng_leaves,
-            weekend_dates, settings, boundary_roster, seed, 10
+            weekend_dates, settings, boundary_roster, historical_counts, seed, 10
         )
 
         if roster:
@@ -357,7 +356,6 @@ def generate_monthly_roster(year, month, team_id, seed=42):
             conn_audit.commit()
             return {"success": True, "message": "Roster successfully generated and saved!"}
         else:
-            # Smart Error Generation based on tracked bottleneck
             bad_day = bottleneck["day"]
             reasons = bottleneck["reason"]
             msg = f"Algorithm failed to find a valid combination. <br><br><b>🚨 Critical Bottleneck: {bad_day} ({day_name(bad_day)})</b><br>"
