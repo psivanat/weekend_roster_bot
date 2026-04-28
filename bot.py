@@ -1,7 +1,7 @@
 import os
 import calendar
 import psycopg2
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from webex_bot.webex_bot import WebexBot
@@ -26,15 +26,10 @@ DB_PARAMS = {
 }
 
 def bot_audit(action, status="success", team_id=None, target_month=None, entity_type=None,
-              entity_id=None, details=None, error_message=None, actor_name=None):
+              entity_id=None, details=None, error_message=None):
     conn = None
     try:
         conn = get_db_connection()
-        # bot context has no Flask current_user; put actor in details
-        payload = details or {}
-        if actor_name:
-            payload["actor_name"] = actor_name
-
         audit_log(
             conn=conn,
             source="webex_bot",
@@ -44,15 +39,146 @@ def bot_audit(action, status="success", team_id=None, target_month=None, entity_
             target_month=target_month,
             entity_type=entity_type,
             entity_id=entity_id,
-            details=payload,
+            details=details,
             error_message=error_message
         )
         conn.commit()
-    except Exception as e:
-        print(f"[AUDIT] failed {action}: {e}")
+    except Exception as ex:
+        print(f"[AUDIT_FAIL] {action}: {ex}")
     finally:
         if conn:
             conn.close()
+
+def get_triggered_team_ids(target_month):
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT team_id
+            FROM preference_requests
+            WHERE target_month = %s
+        """, (target_month,))
+        return [r[0] for r in cur.fetchall()]
+    except Exception as ex:
+        print(f"DB error get_triggered_team_ids: {ex}")
+        return []
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+def send_friday_shift_reminders():
+    print("[SCHEDULER] Checking Friday shift reminders...")
+    
+    # Set timezone to UTC+5:30 (IST)
+    IST = timezone(timedelta(hours=5, minutes=30))
+    now_ist = datetime.now(IST)
+
+    # 1. Only proceed if today is Friday (weekday() == 4)
+    if now_ist.weekday() != 4:
+        return
+
+    # Calculate this weekend's dates
+    tomorrow_sat = now_ist.date() + timedelta(days=1)
+    sunday = now_ist.date() + timedelta(days=2)
+    weekend_dates = [tomorrow_sat, sunday]
+
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # 2. Get all teams that have a shift_end_time configured
+        cur.execute("SELECT id, name, shift_end_time FROM teams WHERE shift_end_time IS NOT NULL")
+        teams = cur.fetchall()
+
+        for team_id, team_name, shift_end in teams:
+            # Calculate target reminder time (shift_end_time - 2 hours)
+            dummy_dt = datetime.combine(now_ist.date(), shift_end)
+            reminder_dt = dummy_dt - timedelta(hours=2)
+            reminder_time = reminder_dt.time()
+
+            # 3. If current IST time hasn't reached the reminder time yet, skip this team
+            if now_ist.time() < reminder_time:
+                continue
+
+            # 4. Fetch engineers assigned to shifts this weekend for this team
+            cur.execute("""
+                SELECT r.engineer_id, e.name, e.webex_email, r.shift_date
+                FROM roster_assignments r
+                JOIN engineers e ON r.engineer_id = e.id
+                WHERE r.team_id = %s AND r.shift_date = ANY(%s::date[])
+            """, (team_id, weekend_dates))
+            assignments = cur.fetchall()
+
+            for eng_id, eng_name, email, shift_date in assignments:
+                if not email:
+                    continue
+
+                # 5. Check deduplication table to ensure we don't spam them
+                cur.execute("""
+                    SELECT id FROM reminder_dispatches
+                    WHERE team_id = %s AND engineer_id = %s AND shift_date = %s AND reminder_type = 'WEEKEND_T_MINUS_2H'
+                """, (team_id, eng_id, shift_date))
+                
+                if cur.fetchone():
+                    continue  # Already sent this reminder
+
+                # 6. Send Webex Message
+                status = 'sent'
+                error_msg = None
+                try:
+                    msg = (
+                        f"🔔 **Upcoming Weekend Shift Reminder**\n\n"
+                        f"Hi {eng_name},\n"
+                        f"This is an automated reminder that you are scheduled for a shift on **{shift_date.strftime('%A, %d %b %Y')}**.\n\n"
+                        f"**Team:** {team_name}"
+                    )
+                    if bot_instance:
+                        bot_instance.teams.messages.create(toPersonEmail=email, markdown=msg)
+                    print(f"Friday reminder sent to {eng_name} for {shift_date}")
+                except Exception as e:
+                    status = 'failed'
+                    error_msg = str(e)
+                    print(f"Failed to send Friday reminder to {eng_name}: {e}")
+
+                # 7. Log to reminder_dispatches so it doesn't send again
+                cur.execute("""
+                    INSERT INTO reminder_dispatches (team_id, engineer_id, shift_date, reminder_type, status, error_message)
+                    VALUES (%s, %s, %s, 'WEEKEND_T_MINUS_2H', %s, %s)
+                """, (team_id, eng_id, shift_date, status, error_msg))
+                conn.commit()
+
+                # 8. Write to main Audit Log
+                bot_audit(
+                    action="WEEKEND_SHIFT_REMINDER",
+                    status=status,
+                    team_id=team_id,
+                    entity_type="roster_assignments",
+                    entity_id=eng_id,
+                    details={"shift_date": str(shift_date), "email": email},
+                    error_message=error_msg
+                )
+
+    except Exception as ex:
+        print(f"Error in send_friday_shift_reminders: {ex}")
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+def get_pending_engineers_for_triggered_teams(target_month):
+    pending_all = []
+    team_ids = get_triggered_team_ids(target_month)
+    for team_id in team_ids:
+        rows = get_pending_engineers(target_month, team_id=team_id)
+        pending_all.extend(rows)
+    return pending_all
 
 def get_db_connection():
     return psycopg2.connect(**DB_PARAMS)
@@ -349,9 +475,15 @@ class SavePreferencesCommand(Command):
         self.card_callback_keyword = "save_preferences"
 
     def execute(self, message, attachment_actions, activity):
-        sender = activity.get("actor", {}).get("emailAddress")
+        sender = activity.get("personEmail") or activity.get("actor", {}).get("emailAddress")
         eng = get_engineer_by_email(sender)
         if not eng:
+            bot_audit(
+                "BOT_PREF_SUBMIT_FAILED",
+                status="failed",
+                details={"reason": "not_registered", "email": sender},
+                error_message="access_denied"
+            )
             return "⛔ Access Denied."
 
         engineer_id, _, team_id = eng
@@ -377,19 +509,33 @@ class SavePreferencesCommand(Command):
                 unique.append(d)
 
         if duplicates:
-            bot_audit("BOT_PREF_SUBMIT_FAILED", status="failed", team_id=team_id, target_month=target_month,
-                entity_type="preferences", entity_id=engineer_id,
+            bot_audit(
+                "BOT_PREF_SUBMIT_FAILED",
+                status="failed",
+                team_id=team_id,
+                target_month=target_month,
+                entity_type="preferences",
+                entity_id=engineer_id,
                 details={"reason": "duplicate_dates", "selected": selected},
-                error_message="duplicate_dates")
+                error_message="duplicate_dates"
+            )
             return "⚠️ Duplicate dates detected. Please resubmit without duplicates."
 
         if len(unique) < min_required:
-            bot_audit("BOT_PREF_SUBMIT_FAILED", status="failed", team_id=team_id, target_month=target_month,
-                entity_type="preferences", entity_id=engineer_id,
+            bot_audit(
+                "BOT_PREF_SUBMIT_FAILED",
+                status="failed",
+                team_id=team_id,
+                target_month=target_month,
+                entity_type="preferences",
+                entity_id=engineer_id,
                 details={"reason": "min_not_met", "selected_count": len(unique), "min_required": min_required},
-                error_message="min_required_not_met")
+                error_message="min_required_not_met"
+            )
             return f"⚠️ You selected {len(unique)} dates, minimum required is {min_required}."
 
+        conn = None
+        cur = None
         try:
             conn = get_db_connection()
             cur = conn.cursor()
@@ -404,14 +550,18 @@ class SavePreferencesCommand(Command):
                     updated_at=CURRENT_TIMESTAMP
             """, (engineer_id, target_month, preferred_count, unique))
             conn.commit()
-            cur.close()
-            conn.close()
-            bot_audit("BOT_PREF_SUBMIT", team_id=team_id, target_month=target_month,
-                entity_type="preferences", entity_id=engineer_id,
-                details={"preferred_count": preferred_count, "priority_dates": unique})
+
+            bot_audit(
+                "BOT_PREF_SUBMIT",
+                team_id=team_id,
+                target_month=target_month,
+                entity_type="preferences",
+                entity_id=engineer_id,
+                details={"preferred_count": preferred_count, "priority_dates": unique}
+            )
+
             check_all_complete_and_notify(target_month, team_id)
 
-            # formatted confirmation list
             formatted = []
             for i, d in enumerate(unique, start=1):
                 dt = datetime.strptime(d, "%Y-%m-%d")
@@ -424,13 +574,23 @@ class SavePreferencesCommand(Command):
                 f"🔢 Preferred Shifts: {preferred_count}\n"
                 f"📋 Your Priority Dates:\n{date_list}"
             )
-        except Exception as e:
-            bot_audit("BOT_PREF_SUBMIT_FAILED", status="failed", team_id=team_id, target_month=target_month,
-                entity_type="preferences", entity_id=engineer_id,
+        except Exception as ex:
+            bot_audit(
+                "BOT_PREF_SUBMIT_FAILED",
+                status="failed",
+                team_id=team_id,
+                target_month=target_month,
+                entity_type="preferences",
+                entity_id=engineer_id,
                 details={"preferred_count": preferred_count},
-                error_message=str(e))
-            return f"❌ Database Error: {e}"
-
+                error_message=str(ex)
+            )
+            return f"❌ Database Error: {ex}"
+        finally:
+            if cur:
+                cur.close()
+            if conn:
+                conn.close()
 class OptOutCommand(Command):
     def __init__(self):
         super().__init__(command_keyword="opt_out_preferences", help_message="Opt out", card=None)
@@ -472,28 +632,75 @@ class OptOutCommand(Command):
             return f"❌ Database Error: {e}"
 
 def nag_pending_engineers():
-    print("[SCHEDULER] 48-hour pending reminder")
+    print("[SCHEDULER] 24-hour pending reminder")
     _, _, target_month, display = get_next_month_info()
-    pending = get_pending_engineers(target_month)
 
     if not bot_instance:
         print("bot_instance not initialized")
         return
 
-    for _, name, email, team_id in pending:
-        if not email:
+    # Only teams where admin triggered broadcast at least once
+    team_ids = get_triggered_team_ids(target_month)
+    if not team_ids:
+        print(f"No triggered teams for {target_month}; skipping reminders.")
+        return
+
+    total_sent = 0
+    total_failed = 0
+
+    for team_id in team_ids:
+        pending = get_pending_engineers(target_month, team_id=team_id)
+        if not pending:
             continue
-        try:
-            team_name = get_team_name(team_id)
-            card = build_step1_card(display, team_name=team_name)
-            bot_instance.teams.messages.create(
-                toPersonEmail=email,
-                text="Reminder: Please submit your preferences.",
-                attachments=[card]
-            )
-            print(f"Reminder sent to {name} ({email})")
-        except Exception as e:
-            print(f"Reminder error for {email}: {e}")
+
+        for eng_id, name, email, _ in pending:
+            if not email:
+                continue
+            try:
+                team_name = get_team_name(team_id)
+                card = build_step1_card(display, team_name=team_name)
+                bot_instance.teams.messages.create(
+                    toPersonEmail=email,
+                    text="Reminder: Please submit your preferences.",
+                    attachments=[card]
+                )
+                total_sent += 1
+
+                bot_audit(
+                    action="BOT_NAG_SENT",
+                    status="success",
+                    team_id=team_id,
+                    target_month=target_month,
+                    entity_type="preferences",
+                    entity_id=eng_id,
+                    details={"email": email, "name": name}
+                )
+                print(f"Reminder sent to {name} ({email})")
+            except Exception as ex:
+                total_failed += 1
+                bot_audit(
+                    action="BOT_NAG_FAILED",
+                    status="failed",
+                    team_id=team_id,
+                    target_month=target_month,
+                    entity_type="preferences",
+                    entity_id=eng_id,
+                    details={"email": email, "name": name},
+                    error_message=str(ex)
+                )
+                print(f"Reminder error for {email}: {ex}")
+
+    bot_audit(
+        action="BOT_NAG_RUN",
+        status="success",
+        target_month=target_month,
+        entity_type="notification",
+        details={
+            "triggered_teams": team_ids,
+            "sent": total_sent,
+            "failed": total_failed
+        }
+    )
 
 def send_admin_digest():
     print("[SCHEDULER] 24-hour admin digest")
@@ -548,7 +755,8 @@ if __name__ == "__main__":
 
     scheduler = BackgroundScheduler()
     scheduler.add_job(send_admin_digest, "cron", hour=9, minute=0)
-    scheduler.add_job(nag_pending_engineers, "interval", hours=48)
+    scheduler.add_job(nag_pending_engineers, "interval", hours=24)
+    scheduler.add_job(send_friday_shift_reminders, "interval", minutes=15)
     scheduler.start()
 
     print("Bot started with scheduler.")

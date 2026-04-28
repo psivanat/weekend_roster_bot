@@ -339,12 +339,68 @@ def broadcast_preferences():
     team_id = session.get("active_team_id")
     year = int(request.form.get("year"))
     month = int(request.form.get("month"))
+    target_month = f"{year}-{month:02d}"
 
+    conn = None
+    cur = None
     try:
+        # 1) send webex broadcast
         result = send_preference_broadcast(team_id, year, month)
+
+        # 2) mark "admin has triggered at least once" for this team+month
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO preference_requests (team_id, target_month, triggered_by, triggered_at)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (team_id, target_month)
+            DO UPDATE SET
+                triggered_by = EXCLUDED.triggered_by,
+                triggered_at = EXCLUDED.triggered_at
+        """, (team_id, target_month, current_user.id))
+
+        # 3) audit
+        audit_log(
+            conn=conn,
+            source="gui",
+            action="BROADCAST_PREFERENCES",
+            status="success",
+            team_id=team_id,
+            target_month=target_month,
+            entity_type="notification",
+            entity_id=team_id,
+            details=result
+        )
+        conn.commit()
+
         flash(f"Broadcast sent. Total={result['total']}, Sent={result['sent']}, Failed={result['failed']}", "success")
+
     except Exception as ex:
+        if conn:
+            conn.rollback()
+            try:
+                audit_log(
+                    conn=conn,
+                    source="gui",
+                    action="BROADCAST_PREFERENCES",
+                    status="failed",
+                    team_id=team_id,
+                    target_month=target_month,
+                    entity_type="notification",
+                    entity_id=team_id,
+                    error_message=str(ex)
+                )
+                conn.commit()
+            except Exception:
+                pass
+
         flash(f"Broadcast failed: {ex}", "error")
+
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
     return redirect(url_for("dashboard", year=year, month=month))
 
