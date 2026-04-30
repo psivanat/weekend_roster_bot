@@ -74,6 +74,36 @@ def bot_audit(action, status="success", team_id=None, target_month=None, entity_
         if conn:
             conn.close()
 
+def get_admin_teams(email):
+    """Returns a list of (team_id, team_name) that this user manages."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute("SELECT id, role FROM users WHERE email = %s", (email,))
+    user = cur.fetchone()
+    if not user:
+        cur.close(); conn.close()
+        return []
+    
+    user_id, role = user
+    if role == 'super_admin':
+        cur.execute("SELECT id, name FROM teams ORDER BY name")
+        teams = cur.fetchall()
+    elif role == 'team_admin':
+        cur.execute("""
+            SELECT t.id, t.name 
+            FROM teams t
+            JOIN user_teams ut ON t.id = ut.team_id
+            WHERE ut.user_id = %s
+            ORDER BY t.name
+        """, (user_id,))
+        teams = cur.fetchall()
+    else:
+        teams = []
+        
+    cur.close(); conn.close()
+    return teams
+
 def get_triggered_team_ids(target_month):
     conn = None
     cur = None
@@ -325,7 +355,7 @@ def check_all_complete_and_notify(target_month, team_id):
                 toPersonEmail=admin_email,
                 markdown=(
                     f"🎉 **All Preferences Collected**\n\n"
-                    f"**{team_name}** has completed preference submission for **{target_month}**.\n"
+                    f"Your team **{team_name}** has completed preference submission for **{target_month}**.\n"
                     f"You can now go to the dashboard and run roster generation."
                 )
             )
@@ -638,20 +668,57 @@ class PendingStatusCommand(Command):
 
     def execute(self, message, attachment_actions, activity):
         sender = activity.get("personEmail") or activity.get("actor", {}).get("emailAddress")
-        eng = get_engineer_by_email(sender)
-        if not eng or not is_user_admin(sender, eng[2]): return "⛔ Access Denied: Admin only."
+        admin_teams = get_admin_teams(sender)
+        
+        if not admin_teams: 
+            return "⛔ Access Denied: You are not an admin for any teams."
+
+        inputs = attachment_actions.inputs if attachment_actions else {}
+        selected_team_id = inputs.get("team_id")
+
+        # If they manage multiple teams and haven't selected one yet, show a dropdown
+        if len(admin_teams) > 1 and not selected_team_id:
+            choices = [{"title": t_name, "value": str(t_id)} for t_id, t_name in admin_teams]
+            card = {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": "1.2",
+                    "body": [
+                        {"type": "TextBlock", "text": "⚙️ Select Team", "weight": "Bolder", "size": "Medium"},
+                        {"type": "TextBlock", "text": "You manage multiple teams. Which team do you want to check?", "wrap": True},
+                        {
+                            "type": "Input.ChoiceSet",
+                            "id": "team_id",
+                            "choices": choices,
+                            "placeholder": "Select a team..."
+                        }
+                    ],
+                    "actions": [
+                        {"type": "Action.Submit", "title": "Check Status", "data": {"callback_keyword": "pending_status"}}
+                    ]
+                }
+            }
+            r = Response()
+            r.text = "Select Team"
+            r.attachments = card
+            return r
+
+        # If they manage 1 team, or they just made a selection from the dropdown
+        team_id = int(selected_team_id) if selected_team_id else admin_teams[0][0]
+        team_name = next((t[1] for t in admin_teams if t[0] == team_id), f"Team {team_id}")
 
         _, _, target_month, display_month = get_next_month_info()
-        pending = get_pending_engineers(target_month, team_id=eng[2])
+        pending = get_pending_engineers(target_month, team_id=team_id)
         
-        bot_audit("BOT_ADMIN_PENDING_CHECK", team_id=eng[2], details={"pending_count": len(pending)})
+        bot_audit("BOT_ADMIN_PENDING_CHECK", team_id=team_id, details={"pending_count": len(pending)})
 
         if not pending:
-            return f"✅ **All Good!** Every engineer in your team has submitted preferences for {display_month}."
+            return f"✅ **All Good!** Every engineer in your team **{team_name}** has submitted preferences for {display_month}."
 
         names = [p[1] for p in pending]
         
-        # Adaptive Card with the "Send Reminders" button
         card = {
             "contentType": "application/vnd.microsoft.card.adaptive",
             "content": {
@@ -660,14 +727,14 @@ class PendingStatusCommand(Command):
                 "version": "1.2",
                 "body": [
                     {"type": "TextBlock", "text": f"⏳ Pending Submissions ({display_month})", "weight": "Bolder", "size": "Medium"},
-                    {"type": "TextBlock", "text": f"{len(names)} engineers have not submitted yet:", "wrap": True},
+                    {"type": "TextBlock", "text": f"**{team_name}**: {len(names)} engineers have not submitted yet:", "wrap": True},
                     {"type": "TextBlock", "text": ", ".join(names), "wrap": True, "color": "Attention"}
                 ],
                 "actions": [
                     {
                         "type": "Action.Submit", 
                         "title": "🔔 Send Reminders Now", 
-                        "data": {"callback_keyword": "send_reminders_now", "target_month": target_month}
+                        "data": {"callback_keyword": "send_reminders_now", "target_month": target_month, "team_id": team_id}
                     }
                 ]
             }
@@ -683,17 +750,23 @@ class SendRemindersNowCommand(Command):
 
     def execute(self, message, attachment_actions, activity):
         sender = activity.get("personEmail") or activity.get("actor", {}).get("emailAddress")
-        eng = get_engineer_by_email(sender)
-        if not eng or not is_user_admin(sender, eng[2]): return "⛔ Access Denied."
-
+        admin_teams = get_admin_teams(sender)
+        
         inputs = attachment_actions.inputs if attachment_actions else {}
+        team_id = inputs.get("team_id")
+        
+        # Security check: Ensure they actually manage the team they are trying to remind
+        if not team_id or int(team_id) not in [t[0] for t in admin_teams]: 
+            return "⛔ Access Denied."
+
+        team_id = int(team_id)
         target_month = inputs.get("target_month")
         _, _, _, display_month = get_next_month_info()
+        team_name = next((t[1] for t in admin_teams if t[0] == team_id), f"Team {team_id}")
         
-        pending = get_pending_engineers(target_month, team_id=eng[2])
+        pending = get_pending_engineers(target_month, team_id=team_id)
         if not pending: return "✅ No pending engineers to remind."
 
-        team_name = get_team_name(eng[2])
         card = build_step1_card(display_month, team_name=team_name)
         
         sent_count = 0
@@ -709,8 +782,8 @@ class SendRemindersNowCommand(Command):
                 except Exception:
                     pass
 
-        bot_audit("BOT_ADMIN_MANUAL_REMINDERS", team_id=eng[2], details={"sent_count": sent_count})
-        return f"✅ Successfully sent reminders to **{sent_count}** engineers."
+        bot_audit("BOT_ADMIN_MANUAL_REMINDERS", team_id=team_id, details={"sent_count": sent_count})
+        return f"✅ Successfully sent reminders to **{sent_count}** engineers in your team **{team_name}**."
 
 class SavePreferencesCommand(Command):
     def __init__(self):
@@ -969,7 +1042,7 @@ def send_admin_digest():
 
         team_name = get_team_name(team_id)
         msg = f"📋 **Daily Preference Digest — {display}**\n\n"
-        msg += f"**{team_name}** pending ({len(names)}):\n"
+        msg += f"Your team **{team_name}** pending ({len(names)}):\n"
         for n in names:
             msg += f"- ⏳ {n}\n"
 

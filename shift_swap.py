@@ -266,6 +266,8 @@ class ReliefResponseCommand(Command):
         super().__init__(command_keyword="relief_response", help_message="Handle relief response", card=None)
 
     def execute(self, message, attachment_actions, activity):
+        from bot import bot_instance, get_team_admin_emails
+        
         action = attachment_actions.inputs.get("action")
         cand_id = attachment_actions.inputs.get("cand_id")
         
@@ -288,6 +290,12 @@ class ReliefResponseCommand(Command):
         target_month = f"{shift_date.year}-{shift_date.month:02d}"
 
         if action == "accept":
+            # SAFETY CHECK: Is the candidate already working this exact date? (Race condition prevention)
+            cur.execute("SELECT id FROM roster_assignments WHERE engineer_id = %s AND shift_date = %s", (cand_eng_id, shift_date))
+            if cur.fetchone():
+                cur.close(); conn.close()
+                return "❌ Swap failed: You are already scheduled to work on this date."
+
             # 1. Update Roster
             cur.execute("UPDATE roster_assignments SET engineer_id = %s WHERE engineer_id = %s AND shift_date = %s", (cand_eng_id, req_eng_id, shift_date))
             
@@ -299,51 +307,143 @@ class ReliefResponseCommand(Command):
             cur.execute("UPDATE relief_candidates SET status = 'expired' WHERE request_id = %s AND id != %s", (req_id, cand_id))
             cur.execute("UPDATE relief_candidates SET status = 'accepted' WHERE id = %s", (cand_id,))
             
+            # Fetch names for notifications
+            cur.execute("SELECT name FROM teams WHERE id = %s", (team_id,))
+            team_name = cur.fetchone()[0]
+            
+            cur.execute("SELECT name, webex_email FROM engineers WHERE id = %s", (req_eng_id,))
+            req_name, req_email = cur.fetchone()
+            
+            cur.execute("SELECT name FROM engineers WHERE id = %s", (cand_eng_id,))
+            cand_name = cur.fetchone()[0]
+
             conn.commit()
             bot_audit("RELIEF_ACCEPTED", team_id=team_id, entity_id=req_id, details={"accepted_by": cand_eng_id})
             
-            # Notify Admin & Requester (pseudo-code, use bot_instance to send messages here)
-            return "✅ Thank you! The roster has been updated and the Admin has been notified."
+            # 4. Send Notifications via Webex
+            if bot_instance:
+                # Notify Requester
+                if req_email:
+                    try:
+                        bot_instance.teams.messages.create(
+                            toPersonEmail=req_email,
+                            markdown=f"🎉 **Relief Request Accepted!**\n\n**{cand_name}** has agreed to cover your shift on **{shift_date.strftime('%A, %d %b %Y')}**.\nYour schedule has been automatically updated."
+                        )
+                    except Exception as e:
+                        print(f"Failed to notify requester: {e}")
+
+                # Notify Admins
+                admin_emails = get_team_admin_emails(team_id)
+                for admin_email in admin_emails:
+                    try:
+                        bot_instance.teams.messages.create(
+                            toPersonEmail=admin_email,
+                            markdown=f"✅ **Shift Relief Completed**\n\nEngineer **{cand_name}** has accepted the relief request for **{req_name}** on **{shift_date.strftime('%A, %d %b %Y')}** for your team **{team_name}**.\nThe roster has been automatically updated."
+                        )
+                    except Exception as e:
+                        print(f"Failed to notify admin: {e}")
+
+            cur.close(); conn.close()
+            return f"✅ Thank you! The roster has been updated for your team **{team_name}** and the Admin has been notified."
 
         elif action == "decline":
             cur.execute("UPDATE relief_candidates SET status = 'declined' WHERE id = %s", (cand_id,))
             conn.commit()
             bot_audit("RELIEF_DECLINED", team_id=team_id, entity_id=req_id, details={"declined_by": cand_eng_id})
             escalate_relief_request(req_id)
+            cur.close(); conn.close()
             return "✅ Your decline has been recorded."
 
         elif action == "last_resort":
             cur.execute("UPDATE relief_candidates SET status = 'last_resort' WHERE id = %s", (cand_id,))
             conn.commit()
             escalate_relief_request(req_id)
+            cur.close(); conn.close()
             return "✅ We will only contact you again if no one else is available."
 
         cur.close(); conn.close()
 
 def fail_relief_request(request_id, reason):
     """Handles the Supercharged Admin Alert."""
-    from bot import bot_instance
+    from bot import bot_instance, get_team_admin_emails
+    
     conn = get_db_connection()
     cur = conn.cursor()
+    
+    # 1. Mark request as failed
     cur.execute("UPDATE relief_requests SET status = 'failed' WHERE id = %s", (request_id,))
     
-    # Fetch data for the Admin alert
-    cur.execute("SELECT team_id, shift_date, requester_id FROM relief_requests WHERE id = %s", (request_id,))
-    team_id, shift_date, req_id = cur.fetchone()
+    # 2. Fetch core data (Team, Date, Requester Name)
+    cur.execute("""
+        SELECT r.team_id, r.shift_date, r.requester_id, t.name, e.name 
+        FROM relief_requests r 
+        JOIN teams t ON r.team_id = t.id
+        JOIN engineers e ON r.requester_id = e.id
+        WHERE r.id = %s
+    """, (request_id,))
+    team_id, shift_date, req_id, team_name, req_name = cur.fetchone()
+    target_month = f"{shift_date.year}-{shift_date.month:02d}"
     
-    cur.execute("SELECT e.name, c.status FROM relief_candidates c JOIN engineers e ON c.engineer_id = e.id WHERE c.request_id = %s", (request_id,))
+    # 3. Fetch candidate responses
+    cur.execute("""
+        SELECT e.name, c.status 
+        FROM relief_candidates c 
+        JOIN engineers e ON c.engineer_id = e.id 
+        WHERE c.request_id = %s
+    """, (request_id,))
     cands = cur.fetchall()
     
     declined = [c[0] for c in cands if c[1] == 'declined']
-    expired = [c[0] for c in cands if c[1] == 'expired' or c[1] == 'pending']
+    expired = [c[0] for c in cands if c[1] in ('expired', 'pending', 'pinged')]
+    
+    # 4. AI SUGGESTIONS: Find active engineers NOT in the candidate list, sorted by fewest current shifts
+    cur.execute("""
+        SELECT e.name, 
+               (SELECT COUNT(*) FROM roster_assignments r2 WHERE r2.engineer_id = e.id AND TO_CHAR(r2.shift_date, 'YYYY-MM') = %s) as current_shifts
+        FROM engineers e
+        WHERE e.team_id = %s 
+          AND e.id != %s 
+          AND e.is_active = TRUE
+          AND e.id NOT IN (SELECT engineer_id FROM relief_candidates WHERE request_id = %s)
+        ORDER BY current_shifts ASC
+        LIMIT 3
+    """, (target_month, team_id, req_id, request_id))
+    
+    suggestions = cur.fetchall()
     
     conn.commit()
-    cur.close(); conn.close()
+    cur.close()
+    conn.close()
     
     bot_audit("RELIEF_FAILED", status="failed", team_id=team_id, entity_id=request_id, error_message=reason)
     
-    # Send message to Admin via bot_instance...
-    print(f"🚨 ALERT ADMIN: Relief failed for {shift_date}. Declined: {declined}. No Response: {expired}.")
+    # 5. Build the Webex Markdown Message
+    msg = f"🚨 **Manual Intervention Required: Relief Request Failed**\n\n"
+    msg += f"**{req_name}** requested coverage for **{shift_date.strftime('%A, %d %b %Y')}**, but the automated system could not secure a replacement for your team **{team_name}**.\n\n"
+    
+    msg += f"❌ **Declined:** {', '.join(declined) if declined else 'None'}\n"
+    msg += f"⏳ **No Response (Cards Expired):** {', '.join(expired) if expired else 'None'}\n\n"
+    
+    msg += f"💡 **AI Suggestion (Engineers to contact manually):**\n"
+    msg += f"*These engineers have the lowest shift counts this month and have not been asked yet:*\n"
+    
+    if suggestions:
+        for i, (sugg_name, shift_count) in enumerate(suggestions, 1):
+            msg += f"{i}. **{sugg_name}** ({shift_count} shifts this month)\n"
+    else:
+        msg += "*- No other active engineers available on this team.*\n"
+        
+    msg += f"\n*Reason for failure: {reason}*"
+
+    # 6. Send to all Team Admins
+    admin_emails = get_team_admin_emails(team_id)
+    for admin_email in admin_emails:
+        if bot_instance:
+            try:
+                bot_instance.teams.messages.create(toPersonEmail=admin_email, markdown=msg)
+            except Exception as e:
+                print(f"Failed to send relief failure alert to {admin_email}: {e}")
+
 
 # ==========================================
 # 4. BACKGROUND TIMER JOB (Run every 5 mins)
