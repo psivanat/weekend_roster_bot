@@ -213,8 +213,8 @@ class SaveTeamSpaceCommand(Command):
         inputs = attachment_actions.inputs if attachment_actions else {}
         team_id = inputs.get("team_id")
         
-        # NEW: Grab the room_id directly from the click activity, not the card inputs!
-        room_id = activity.get("roomId")
+        # FIX: Grab the room_id from the attachment_actions object!
+        room_id = getattr(attachment_actions, 'roomId', None) or activity.get("roomId")
 
         if not team_id or int(team_id) not in [t[0] for t in admin_teams]:
             return "⛔ Access Denied: You do not have permission to link this team."
