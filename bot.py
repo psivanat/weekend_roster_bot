@@ -121,7 +121,7 @@ def get_admin_teams(email):
 class RegisterTeamSpaceCommand(Command):
     def __init__(self):
         super().__init__(
-            command_keyword="register_space",
+            command_keyword="register_team",
             help_message="Admin: Link this Webex space to your team.",
             card=None
         )
@@ -203,7 +203,7 @@ class RegisterTeamSpaceCommand(Command):
 
 class SaveTeamSpaceCommand(Command):
     def __init__(self):
-        super().__init__(command_keyword="save_team_space", help_message="Save space link", card=None)
+        super().__init__(command_keyword="save_team_space", help_message=None, card=None)
 
     def execute(self, message, attachment_actions, activity):
         # 1. Identify sender and validate again (Security)
@@ -212,10 +212,15 @@ class SaveTeamSpaceCommand(Command):
 
         inputs = attachment_actions.inputs if attachment_actions else {}
         team_id = inputs.get("team_id")
-        room_id = inputs.get("room_id")
+        
+        # NEW: Grab the room_id directly from the click activity, not the card inputs!
+        room_id = activity.get("roomId")
 
         if not team_id or int(team_id) not in [t[0] for t in admin_teams]:
             return "⛔ Access Denied: You do not have permission to link this team."
+
+        if not room_id:
+            return "❌ Error: Could not detect the Webex Space ID."
 
         team_id = int(team_id)
         team_name = next((t[1] for t in admin_teams if t[0] == team_id), f"Team {team_id}")
@@ -599,7 +604,7 @@ class StatusCommand(Command):
 
 class Step1PreferencesCommand(Command):
     def __init__(self):
-        super().__init__(command_keyword="step1_preferences", help_message="Step 1", card=None)
+        super().__init__(command_keyword="step1_preferences", help_message=None, card=None)
         self.card_callback_keyword = "step1_preferences"
 
     def execute(self, message, attachment_actions, activity):
@@ -615,7 +620,7 @@ class Step1PreferencesCommand(Command):
 
 class Step2PreferencesCommand(Command):
     def __init__(self):
-        super().__init__(command_keyword="step2_preferences", help_message="Step 2", card=None)
+        super().__init__(command_keyword="step2_preferences", help_message=None, card=None)
         self.card_callback_keyword = "step2_preferences"
 
     def execute(self, message, attachment_actions, activity):
@@ -915,7 +920,7 @@ class PendingStatusCommand(Command):
 
 class SendRemindersNowCommand(Command):
     def __init__(self):
-        super().__init__(command_keyword="send_reminders_now", help_message="Admin: Send manual reminders.", card=None)
+        super().__init__(command_keyword="send_reminders_now", help_message=None, card=None)
 
     def execute(self, message, attachment_actions, activity):
         sender = activity.get("personEmail") or activity.get("actor", {}).get("emailAddress")
@@ -956,7 +961,7 @@ class SendRemindersNowCommand(Command):
 
 class SavePreferencesCommand(Command):
     def __init__(self):
-        super().__init__(command_keyword="save_preferences", help_message="Save preferences", card=None)
+        super().__init__(command_keyword="save_preferences", help_message=None, card=None)
         self.card_callback_keyword = "save_preferences"
 
     def execute(self, message, attachment_actions, activity):
@@ -1078,7 +1083,7 @@ class SavePreferencesCommand(Command):
                 conn.close()
 class OptOutCommand(Command):
     def __init__(self):
-        super().__init__(command_keyword="opt_out_preferences", help_message="Opt out", card=None)
+        super().__init__(command_keyword="opt_out_preferences", help_message=None, card=None)
         self.card_callback_keyword = "opt_out_preferences"
 
     def execute(self, message, attachment_actions, activity):

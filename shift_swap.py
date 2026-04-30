@@ -138,7 +138,7 @@ class UnableToWorkCommand(Command):
 # ==========================================
 class SubmitReliefRequestCommand(Command):
     def __init__(self):
-        super().__init__(command_keyword="submit_relief_request", help_message="Process relief", card=None)
+        super().__init__(command_keyword="submit_relief_request", help_message=None, card=None)
 
     def execute(self, message, attachment_actions, activity):
         sender = activity.get("actor", {}).get("emailAddress")
@@ -263,7 +263,7 @@ def escalate_relief_request(request_id):
 # ==========================================
 class ReliefResponseCommand(Command):
     def __init__(self):
-        super().__init__(command_keyword="relief_response", help_message="Handle relief response", card=None)
+        super().__init__(command_keyword="relief_response", help_message=None, card=None)
 
     def execute(self, message, attachment_actions, activity):
         from bot import bot_instance, get_team_admin_emails
