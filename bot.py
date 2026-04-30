@@ -25,6 +25,20 @@ DB_PARAMS = {
     "password": os.getenv("DB_PASS")
 }
 
+def keep_alive_ping():
+    """Sends a tiny request to Webex to keep the proxy WebSocket tunnel open."""
+    if bot_instance:
+        try:
+            # Fetching the bot's own details is the lightest possible API call
+            bot_instance.teams.people.me()
+            print("[KEEPALIVE] Heartbeat ping sent successfully.")
+        except Exception as e:
+            print(f"[KEEPALIVE] Network error detected: {e}")
+            # If the proxy completely killed the connection, force the script to crash.
+            # Systemd will instantly restart it and build a fresh, working WebSocket.
+            import os
+            os._exit(1)
+
 def get_upcoming_weekend():
     now = datetime.now()
     days_ahead_sat = 5 - now.weekday()
@@ -637,28 +651,63 @@ class WhoIsWorkingCommand(Command):
         eng = get_engineer_by_email(sender)
         if not eng: return "⛔ Access Denied."
 
+        engineer_id, name, my_team_id = eng
         sat_date, sun_date = get_upcoming_weekend()
+        
+        # Check if they are an admin and get their teams
+        admin_teams = get_admin_teams(sender)
+
         try:
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute("""
-                SELECT r.shift_date, e.name FROM roster_assignments r
-                JOIN engineers e ON r.engineer_id = e.id
-                WHERE r.team_id=%s AND r.shift_date IN (%s, %s) ORDER BY r.shift_date, e.name
-            """, (eng[2], sat_date, sun_date))
-            results = cur.fetchall()
-            cur.close()
-            conn.close()
-
-            bot_audit("BOT_WHO_IS_WORKING_CHECK", team_id=eng[2], entity_type="engineer", entity_id=eng[0])
-
-            sat_workers = [r[1] for r in results if str(r[0]) == str(sat_date)]
-            sun_workers = [r[1] for r in results if str(r[0]) == str(sun_date)]
             
             msg = f"👥 **Upcoming Weekend Roster:**\n\n"
-            msg += f"**Saturday ({sat_date.strftime('%d %b')}):** {', '.join(sat_workers) if sat_workers else 'No one scheduled.'}\n"
-            msg += f"**Sunday ({sun_date.strftime('%d %b')}):** {', '.join(sun_workers) if sun_workers else 'No one scheduled.'}"
-            return msg
+
+            if admin_teams:
+                # --- ADMIN VIEW: Show all managed teams ---
+                bot_audit("BOT_WHO_IS_WORKING_ADMIN_CHECK", details={"email": sender, "teams_count": len(admin_teams)})
+                
+                for t_id, t_name in admin_teams:
+                    cur.execute("""
+                        SELECT r.shift_date, e.name FROM roster_assignments r
+                        JOIN engineers e ON r.engineer_id = e.id
+                        WHERE r.team_id=%s AND r.shift_date IN (%s, %s) ORDER BY r.shift_date, e.name
+                    """, (t_id, sat_date, sun_date))
+                    results = cur.fetchall()
+                    
+                    sat_workers = [r[1] for r in results if str(r[0]) == str(sat_date)]
+                    sun_workers = [r[1] for r in results if str(r[0]) == str(sun_date)]
+                    
+                    msg += f"🏢 **{t_name}**\n"
+                    msg += f"**Sat ({sat_date.strftime('%d %b')}):** {', '.join(sat_workers) if sat_workers else 'No one scheduled.'}\n"
+                    msg += f"**Sun ({sun_date.strftime('%d %b')}):** {', '.join(sun_workers) if sun_workers else 'No one scheduled.'}\n\n"
+            
+            else:
+                # --- ENGINEER VIEW: Show only their team ---
+                bot_audit("BOT_WHO_IS_WORKING_CHECK", team_id=my_team_id, entity_type="engineer", entity_id=engineer_id)
+                
+                # Fetch their team name
+                cur.execute("SELECT name FROM teams WHERE id = %s", (my_team_id,))
+                my_team_name = cur.fetchone()[0]
+
+                cur.execute("""
+                    SELECT r.shift_date, e.name FROM roster_assignments r
+                    JOIN engineers e ON r.engineer_id = e.id
+                    WHERE r.team_id=%s AND r.shift_date IN (%s, %s) ORDER BY r.shift_date, e.name
+                """, (my_team_id, sat_date, sun_date))
+                results = cur.fetchall()
+                
+                sat_workers = [r[1] for r in results if str(r[0]) == str(sat_date)]
+                sun_workers = [r[1] for r in results if str(r[0]) == str(sun_date)]
+                
+                msg += f"🏢 **{my_team_name}**\n"
+                msg += f"**Sat ({sat_date.strftime('%d %b')}):** {', '.join(sat_workers) if sat_workers else 'No one scheduled.'}\n"
+                msg += f"**Sun ({sun_date.strftime('%d %b')}):** {', '.join(sun_workers) if sun_workers else 'No one scheduled.'}"
+
+            cur.close()
+            conn.close()
+            return msg.strip()
+
         except Exception as e:
             return f"❌ DB Error: {e}"
 
@@ -1081,6 +1130,7 @@ if __name__ == "__main__":
     scheduler.add_job(nag_pending_engineers, "interval", hours=24)
     scheduler.add_job(send_friday_shift_reminders, "interval", minutes=15)
     scheduler.add_job(tick_relief_timers, "interval", minutes=5)
+    scheduler.add_job(keep_alive_ping, "interval", minutes=10)
     scheduler.start()
 
     print("Bot started with scheduler.")
