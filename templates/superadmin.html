@@ -39,34 +39,36 @@
 </div>
 
 <!-- CREATE USER -->
-<div class="card">
+<div class="card mb-4">
     <h3>Create New User</h3>
-    <form method="POST" class="form-row" style="align-items: flex-start;">
+    <form method="POST" class="form-row" style="align-items: flex-start; gap: 20px;">
+        <!-- We use a hidden input for action here because there's only one button -->
         <input type="hidden" name="action" value="create_user">
         
-        <div style="flex: 1;">
-            <input type="text" name="username" placeholder="Username" required>
-            <input type="password" name="password" placeholder="Password" required>
-            <select name="role" required>
+        <div style="flex: 1; display: flex; flex-direction: column; gap: 10px;">
+            <input type="text" class="form-control" name="username" placeholder="Username" required>
+            <input type="email" class="form-control" name="email" placeholder="Email Address (Webex)" required>
+            <input type="password" class="form-control" name="password" placeholder="Password" required>
+            <select class="form-select" name="role" required>
                 <option value="team_admin">Team Admin</option>
                 <option value="viewer">Read-Only Viewer</option>
                 <option value="super_admin">Super Admin</option>
             </select>
         </div>
         
-        <div style="flex: 1; border: 1px solid var(--border); padding: 15px; border-radius: 6px;">
-            <p style="margin: 0 0 10px 0; font-size: 0.9rem; font-weight: bold;">Assign Teams (Not needed for Super Admin):</p>
-            <div style="max-height: 120px; overflow-y: auto;">
+        <!-- REDESIGNED: Multi-Select Box -->
+        <div style="flex: 1; border: 1px solid var(--border, #ccc); padding: 15px; border-radius: 6px; background-color: #fafafa;">
+            <p style="margin: 0 0 5px 0; font-size: 0.9rem; font-weight: bold;">Assign Teams:</p>
+            <small style="display: block; margin-bottom: 10px; color: #666;">Hold Ctrl (Windows) or Cmd (Mac) to select multiple.</small>
+            <select name="team_ids" multiple class="form-control" style="height: 120px;">
                 {% for team in all_teams %}
-                <label style="display: block; margin-bottom: 5px;">
-                    <input type="checkbox" name="team_ids" value="{{ team.id }}"> {{ team.name }}
-                </label>
+                    <option value="{{ team.id }}">{{ team.name }}</option>
                 {% endfor %}
-            </div>
+            </select>
         </div>
         
         <div>
-            <button type="submit" class="btn" style="height: 100%;">Create User</button>
+            <button type="submit" class="btn btn-primary" style="height: 100%;">Create User</button>
         </div>
     </form>
 </div>
@@ -74,48 +76,75 @@
 <!-- MANAGE USERS -->
 <div class="card">
     <h3>Manage Existing Users</h3>
-    <table>
-        <thead>
-            <tr>
-                <th>Username</th>
-                <th>Role</th>
-                <th>Assigned Teams</th>
-                <th>Reset Password</th>
-                <th>Status</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for u in all_users %}
-            <tr>
-                <form method="POST">
-                    <input type="hidden" name="action" value="update_user">
-                    <input type="hidden" name="user_id" value="{{ u.id }}">
-                    
-                    <td><strong>{{ u.username }}</strong></td>
-                    <td>{{ u.role }}</td>
-                    
-                    <td>
-                        {% if u.role == 'super_admin' %}
-                            <em>All Teams</em>
-                        {% else %}
-                            <div style="max-height: 80px; overflow-y: auto; font-size: 0.85rem;">
-                                {% for team in all_teams %}
-                                <label style="display: block;">
-                                    <input type="checkbox" name="team_ids" value="{{ team.id }}" {% if team.id in u.team_ids %}checked{% endif %}> {{ team.name }}
+    <div style="overflow-x: auto;">
+        <table class="table" style="min-width: 950px;">
+            <thead>
+                <tr>
+                    <th>Username</th>
+                    <th>Email</th>
+                    <th>Role</th>
+                    <th style="width: 180px;">Assigned Teams</th>
+                    <th>Reset Password</th>
+                    <th style="width: 120px;">Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for u in all_users %}
+                <tr>
+                    <form method="POST">
+                        <input type="hidden" name="user_id" value="{{ u.id }}">
+                        
+                        <td style="vertical-align: middle;"><strong>{{ u.username }}</strong></td>
+                        
+                        <td style="vertical-align: middle;">
+                            <input type="email" class="form-control form-control-sm" name="email" value="{{ u.email }}" placeholder="Email..." style="width: 160px; margin: 0;" required>
+                        </td>
+                        
+                        <td style="vertical-align: middle;">{{ u.role }}</td>
+                        
+                        <!-- REDESIGNED: Multi-Select Box -->
+                        <td style="vertical-align: middle;">
+                            {% if u.role == 'super_admin' %}
+                                <em style="color: #666;">All Teams</em>
+                            {% else %}
+                                <select name="team_ids" multiple class="form-control form-control-sm" style="height: 70px; width: 100%;">
+                                    {% for team in all_teams %}
+                                        <option value="{{ team.id }}" {% if team.id in u.team_ids %}selected{% endif %}>{{ team.name }}</option>
+                                    {% endfor %}
+                                </select>
+                            {% endif %}
+                        </td>
+                        
+                        <td style="vertical-align: middle;">
+                            <input type="password" class="form-control form-control-sm" name="new_password" placeholder="New Password..." style="width: 130px; margin: 0;">
+                        </td>
+                        
+                        <!-- REDESIGNED: Color-Coded Radio Buttons -->
+                        <td style="vertical-align: middle;">
+                            <div style="display: flex; flex-direction: column; gap: 4px;">
+                                <label style="color: #198754; font-weight: bold; margin: 0; cursor: pointer; font-size: 0.9rem;">
+                                    <input type="radio" name="is_active" value="true" {% if u.is_active %}checked{% endif %} style="margin-right: 4px;"> Active
                                 </label>
-                                {% endfor %}
+                                <label style="color: #dc3545; font-weight: bold; margin: 0; cursor: pointer; font-size: 0.9rem;">
+                                    <input type="radio" name="is_active" value="false" {% if not u.is_active %}checked{% endif %} style="margin-right: 4px;"> Inactive
+                                </label>
                             </div>
-                        {% endif %}
-                    </td>
-                    
-                    <td><input type="password" name="new_password" placeholder="New Password..." style="width: 150px; margin: 0;"></td>
-                    <td><input type="checkbox" name="is_active" {% if u.is_active %}checked{% endif %}> Active</td>
-                    <td><button type="submit" class="btn btn-outline" style="padding: 5px 10px;">Update</button></td>
-                </form>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+                        </td>
+                        
+                        <!-- NEW: Update & Delete Buttons -->
+                        <td style="vertical-align: middle;">
+                            <div style="display: flex; gap: 5px; flex-direction: column;">
+                                <!-- The 'name="action"' tells the backend which button was clicked -->
+                                <button type="submit" name="action" value="update_user" class="btn btn-outline-primary btn-sm">Update</button>
+                                <button type="submit" name="action" value="delete_user" class="btn btn-outline-danger btn-sm" onclick="return confirm('Are you sure you want to completely delete {{ u.username }}? This cannot be undone.');">Delete</button>
+                            </div>
+                        </td>
+                    </form>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
 </div>
 {% endblock %}

@@ -894,56 +894,94 @@ def superadmin():
     if request.method == "POST":
         action = request.form.get("action")
 
-        if action == "create_team":
-            cur.execute("INSERT INTO teams (name) VALUES (%s)", (request.form.get("team_name"),))
-            flash("Team created.", "success")
+        try:
+            if action == "create_team":
+                team_name = request.form.get("team_name")
+                cur.execute("INSERT INTO teams (name) VALUES (%s)", (team_name,))
+                audit_log(conn, source="gui", action="CREATE_TEAM", status="success", details={"team_name": team_name})
+                flash("Team created.", "success")
 
-        elif action == "create_user":
-            username = request.form.get("username")
-            password_hash = generate_password_hash(request.form.get("password"))
-            role = request.form.get("role")
-            team_ids = request.form.getlist("team_ids")
+            elif action == "create_user":
+                username = request.form.get("username")
+                email = request.form.get("email")  # NEW: Extract email
+                password_hash = generate_password_hash(request.form.get("password"))
+                role = request.form.get("role")
+                team_ids = request.form.getlist("team_ids")
 
-            cur.execute("""
-                INSERT INTO users (username, password_hash, role)
-                VALUES (%s, %s, %s)
-                RETURNING id
-            """, (username, password_hash, role))
-            new_user_id = cur.fetchone()["id"]
+                # NEW: Added email to INSERT
+                cur.execute("""
+                    INSERT INTO users (username, email, password_hash, role)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id
+                """, (username, email, password_hash, role))
+                new_user_id = cur.fetchone()["id"]
 
-            if role != "super_admin":
+                if role != "super_admin":
+                    for t in team_ids:
+                        cur.execute("INSERT INTO user_teams (user_id, team_id) VALUES (%s, %s)", (new_user_id, t))
+                
+                audit_log(conn, source="gui", action="CREATE_USER", status="success", entity_type="users", entity_id=new_user_id, details={"username": username, "role": role})
+                flash("User created successfully.", "success")
+
+            elif action == "delete_team":
+                t_id = request.form.get("team_id")
+                cur.execute("DELETE FROM teams WHERE id=%s", (t_id,))
+                audit_log(conn, source="gui", action="DELETE_TEAM", status="success", entity_type="teams", entity_id=t_id)
+                flash("Team and associated data deleted.", "success")
+
+            elif action == "update_user":
+                user_id = request.form.get("user_id")
+                email = request.form.get("email")  # NEW: Extract email
+                new_password = request.form.get("new_password")
+                
+                # NEW: Handle radio button string ("true" or "false")
+                is_active = request.form.get("is_active") == "true"
+                team_ids = request.form.getlist("team_ids")
+
+                # NEW: Added email to UPDATE
+                cur.execute("UPDATE users SET is_active=%s, email=%s WHERE id=%s", (is_active, email, user_id))
+                
+                if new_password:
+                    cur.execute("UPDATE users SET password_hash=%s WHERE id=%s",
+                                (generate_password_hash(new_password), user_id))
+
+                cur.execute("DELETE FROM user_teams WHERE user_id=%s", (user_id,))
                 for t in team_ids:
-                    cur.execute("INSERT INTO user_teams (user_id, team_id) VALUES (%s, %s)", (new_user_id, t))
-            flash("User created successfully.", "success")
+                    cur.execute("INSERT INTO user_teams (user_id, team_id) VALUES (%s, %s)", (user_id, t))
 
-        elif action == "delete_team":
-            t_id = request.form.get("team_id")
-            cur.execute("DELETE FROM teams WHERE id=%s", (t_id,))
-            flash("Team and associated data deleted.", "success")
+                audit_log(conn, source="gui", action="UPDATE_USER", status="success", entity_type="users", entity_id=user_id)
+                flash("User updated successfully.", "success")
 
-        elif action == "update_user":
-            user_id = request.form.get("user_id")
-            new_password = request.form.get("new_password")
-            is_active = request.form.get("is_active") == "on"
-            team_ids = request.form.getlist("team_ids")
+            elif action == "delete_user":
+                user_id = request.form.get("user_id")
+                
+                # Safety Check: Prevent the admin from deleting themselves
+                if int(user_id) == current_user.id:
+                    flash("You cannot delete your own account.", "error")
+                else:
+                    cur.execute("DELETE FROM user_teams WHERE user_id=%s", (user_id,))
+                    cur.execute("DELETE FROM users WHERE id=%s", (user_id,))
+                    audit_log(conn, source="gui", action="DELETE_USER", status="success", entity_type="users", entity_id=user_id)
+                    flash("User deleted successfully.", "success")
 
-            cur.execute("UPDATE users SET is_active=%s WHERE id=%s", (is_active, user_id))
-            if new_password:
-                cur.execute("UPDATE users SET password_hash=%s WHERE id=%s",
-                            (generate_password_hash(new_password), user_id))
+            # Commit if no errors occurred
+            conn.commit()
 
-            cur.execute("DELETE FROM user_teams WHERE user_id=%s", (user_id,))
-            for t in team_ids:
-                cur.execute("INSERT INTO user_teams (user_id, team_id) VALUES (%s, %s)", (user_id, t))
+        except Exception as ex:
+            conn.rollback()
+            try:
+                audit_log(conn, source="gui", action=action or "UNKNOWN_ACTION", status="failed", error_message=str(ex))
+                conn.commit()
+            except Exception:
+                pass
+            flash(f"Error processing request: {ex}", "error")
 
-            flash("User updated successfully.", "success")
-
-        conn.commit()
-
+    # GET: Fetch data for the page
     cur.execute("SELECT * FROM teams ORDER BY name")
     all_teams = cur.fetchall()
 
-    cur.execute("SELECT id, username, role, is_active FROM users ORDER BY id")
+    # NEW: Added 'email' to the SELECT query so it populates the HTML table
+    cur.execute("SELECT id, username, email, role, is_active FROM users ORDER BY id")
     all_users = cur.fetchall()
 
     for u in all_users:
