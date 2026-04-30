@@ -50,7 +50,7 @@
                     </small>
                 </div>
 
-                <!-- NEW: Historical Fairness -->
+                <!-- Historical Fairness -->
                 <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid #eee;">
                     <label style="display: flex; align-items: center; gap: 8px; font-weight: bold; cursor: pointer;">
                         <input type="checkbox" name="consider_historical_shifts" {% if settings.consider_historical_shifts %}checked{% endif %} style="width: auto; margin: 0;">
@@ -68,7 +68,18 @@
 
             </div>
         </div>
-        <button type="submit" class="btn" style="margin-top: 20px;">💾 Save Settings</button>
+
+        <!-- NEW: Webex Integration Section -->
+        <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd;">
+            <h3>Webex Integration</h3>
+            <label>Linked Team Space ID</label>
+            <input type="text" name="webex_space_id" value="{{ settings.webex_space_id or '' }}" placeholder="No space linked yet..." style="width: 100%; padding: 10px; font-family: monospace; font-size: 0.9em; color: #555; background-color: #f9f9f9; border: 1px solid #ccc; border-radius: 4px;">
+            <small style="display: block; color: #666; margin-top: 8px;">
+                <em>To link a space, add the bot to a Webex group and type <strong>@BotName register_team</strong>. To unlink a space, delete the text above and click Save.</em>
+            </small>
+        </div>
+
+        <button type="submit" class="btn" style="margin-top: 25px;">💾 Save Settings</button>
     </form>
 </div>
 {% endblock %}

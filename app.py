@@ -792,25 +792,31 @@ def settings():
             shift_start_time = request.form.get("shift_start_time") or None
             shift_end_time = request.form.get("shift_end_time") or None
             
-            # NEW: Extract boolean toggles (checkboxes)
-            # If a checkbox is unchecked, it isn't sent in request.form
+            # Extract boolean toggles (checkboxes)
             strict_7_day_rest = 'strict_7_day_rest' in request.form
             allow_same_weekend = 'allow_same_weekend' in request.form
             consider_historical_shifts = 'consider_historical_shifts' in request.form
             historical_months_count = int(request.form.get("historical_months_count", 1))
+
+            # NEW: Extract the Webex Space ID (Convert empty string to None for NULL in DB)
+            webex_space_id = request.form.get("webex_space_id")
+            if not webex_space_id or webex_space_id.strip() == "":
+                webex_space_id = None
 
             cur.execute("""
                 UPDATE teams
                 SET sat_coverage=%s, sun_coverage=%s, min_preferences=%s, 
                     shift_start_time=%s, shift_end_time=%s,
                     strict_7_day_rest=%s, allow_same_weekend=%s,
-                    consider_historical_shifts=%s, historical_months_count=%s
+                    consider_historical_shifts=%s, historical_months_count=%s,
+                    webex_space_id=%s
                 WHERE id=%s
             """, (
                 sat_coverage, sun_coverage, min_preferences, 
                 shift_start_time, shift_end_time,
                 strict_7_day_rest, allow_same_weekend,
                 consider_historical_shifts, historical_months_count,
+                webex_space_id,  # <-- Added here
                 team_id
             ))
 
@@ -822,7 +828,8 @@ def settings():
                     "sat_coverage": sat_coverage,
                     "sun_coverage": sun_coverage,
                     "strict_7_day_rest": strict_7_day_rest,
-                    "allow_same_weekend": allow_same_weekend
+                    "allow_same_weekend": allow_same_weekend,
+                    "webex_space_id": webex_space_id
                 }
             )
             

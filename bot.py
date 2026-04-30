@@ -118,6 +118,126 @@ def get_admin_teams(email):
     cur.close(); conn.close()
     return teams
 
+class RegisterTeamSpaceCommand(Command):
+    def __init__(self):
+        super().__init__(
+            command_keyword="register_space",
+            help_message="Admin: Link this Webex space to your team.",
+            card=None
+        )
+        self.aliases = ["link_space", "register_team"]
+
+    def execute(self, message, attachment_actions, activity):
+        sender = activity.get("personEmail") or activity.get("actor", {}).get("emailAddress")
+        
+        # 1. Security Gate: Get teams they manage
+        admin_teams = get_admin_teams(sender)
+        if not admin_teams:
+            return "⛔ Access Denied: Only registered Team Admins can link spaces."
+
+        # 2. Check which of their teams ALREADY have a space linked
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        available_teams = []
+        already_linked_teams = []
+        
+        for t_id, t_name in admin_teams:
+            cur.execute("SELECT webex_space_id FROM teams WHERE id = %s", (t_id,))
+            res = cur.fetchone()
+            if res and res[0]:  # If webex_space_id is not null/empty
+                already_linked_teams.append(t_name)
+            else:
+                available_teams.append({"title": t_name, "value": str(t_id)})
+                
+        cur.close()
+        conn.close()
+
+        # 3. If ALL their teams are already linked, block the action
+        if not available_teams:
+            msg = "⚠️ **Action Blocked**\n\n"
+            msg += "All the teams you manage already have a Webex Space linked to them:\n"
+            for name in already_linked_teams:
+                msg += f"- {name}\n"
+            msg += "\n*To link a new space, please go to the ShiftSync Team Settings dashboard and clear the existing Space ID first.*"
+            return msg
+
+        # 4. Get the Room ID of the current space
+        room_id = activity.get("roomId")
+
+        # 5. Build the dropdown card (only showing teams that are NOT linked yet)
+        card = {
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "type": "AdaptiveCard",
+                "version": "1.2",
+                "body": [
+                    {"type": "TextBlock", "text": "🔗 Link Team Space", "weight": "Bolder", "size": "Medium"},
+                    {"type": "TextBlock", "text": "Which team should use this space for notifications?", "wrap": True},
+                    {
+                        "type": "Input.ChoiceSet",
+                        "id": "team_id",
+                        "choices": available_teams,
+                        "placeholder": "Select a team..."
+                    }
+                ],
+                "actions": [
+                    {
+                        "type": "Action.Submit",
+                        "title": "Link Space",
+                        "data": {
+                            "callback_keyword": "save_team_space",
+                            "room_id": room_id
+                        }
+                    }
+                ]
+            }
+        }
+        
+        r = Response()
+        r.text = "Link Space"
+        r.attachments = card
+        return r
+
+
+class SaveTeamSpaceCommand(Command):
+    def __init__(self):
+        super().__init__(command_keyword="save_team_space", help_message="Save space link", card=None)
+
+    def execute(self, message, attachment_actions, activity):
+        # 1. Identify sender and validate again (Security)
+        sender = activity.get("personEmail") or activity.get("actor", {}).get("emailAddress")
+        admin_teams = get_admin_teams(sender)
+
+        inputs = attachment_actions.inputs if attachment_actions else {}
+        team_id = inputs.get("team_id")
+        room_id = inputs.get("room_id")
+
+        if not team_id or int(team_id) not in [t[0] for t in admin_teams]:
+            return "⛔ Access Denied: You do not have permission to link this team."
+
+        team_id = int(team_id)
+        team_name = next((t[1] for t in admin_teams if t[0] == team_id), f"Team {team_id}")
+
+        # 2. Save to Database
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            
+            # Update the teams table with the new space ID
+            cur.execute("UPDATE teams SET webex_space_id = %s WHERE id = %s", (room_id, team_id))
+            conn.commit()
+            cur.close()
+            conn.close()
+
+            bot_audit("BOT_LINKED_SPACE", team_id=team_id, details={"room_id": room_id, "admin": sender})
+
+            return f"✅ **Success!** This Webex space is now officially linked to **{team_name}**.\n\nTeam notifications (like published rosters and shift swaps) will be sent here."
+
+        except Exception as e:
+            return f"❌ Database Error: {e}"
+
 def get_triggered_team_ids(target_month):
     conn = None
     cur = None
@@ -1125,6 +1245,8 @@ if __name__ == "__main__":
     bot.add_command(UnableToWorkCommand())
     bot.add_command(SubmitReliefRequestCommand())
     bot.add_command(ReliefResponseCommand())
+    bot.add_command(RegisterTeamSpaceCommand())
+    bot.add_command(SaveTeamSpaceCommand())
     scheduler = BackgroundScheduler()
     scheduler.add_job(send_admin_digest, "cron", hour=9, minute=0)
     scheduler.add_job(nag_pending_engineers, "interval", hours=24)
