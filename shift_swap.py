@@ -730,6 +730,184 @@ class SubmitSwapRequestCommand(Command):
 
             return f"✅ Swap request sent to **{target_name}**. You will be notified when they respond."
 
+class RespondSwapCommand(Command):
+    def __init__(self):
+        super().__init__(command_keyword="respond_swap", help_message=None, card=None)
+
+    def execute(self, message, attachment_actions, activity):
+        from bot import bot_instance, get_team_admin_emails
+        inputs = attachment_actions.inputs
+        action = inputs.get("action")
+        swap_id = inputs.get("swap_id")
+        selected_return_shift = inputs.get("selected_return_shift")
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT s.status, s.requester_id, s.target_id, s.requester_shift_date, s.team_id,
+                   r.name, r.webex_email, t.name, t.webex_email
+            FROM shift_swaps s
+            JOIN engineers r ON s.requester_id = r.id
+            JOIN engineers t ON s.target_id = t.id
+            WHERE s.id = %s
+        """, (swap_id,))
+        swap = cur.fetchone()
+
+        if not swap or swap[0] != 'pending':
+            cur.close(); conn.close()
+            return "ℹ️ This swap request has already been processed or expired."
+
+        status, req_id, target_id, req_shift_date, team_id, req_name, req_email, target_name, target_email = swap
+
+        if action == "decline":
+            cur.execute("UPDATE shift_swaps SET status = 'declined' WHERE id = %s", (swap_id,))
+            conn.commit()
+            bot_audit("SWAP_DECLINED", team_id=team_id, entity_id=swap_id)
+            
+            if bot_instance and req_email:
+                bot_instance.teams.messages.create(toPersonEmail=req_email, markdown=f"❌ **Swap Declined:** {target_name} declined your shift swap request for {req_shift_date}.")
+            
+            cur.close(); conn.close()
+            return "✅ You have declined the swap request."
+
+        elif action == "accept":
+            if not selected_return_shift:
+                cur.close(); conn.close()
+                return "⚠️ You must select a shift from the dropdown to give in return."
+
+            # SAFETY CHECK: Does Alice still own this shift?
+            cur.execute("SELECT id FROM roster_assignments WHERE engineer_id = %s AND shift_date = %s", (req_id, req_shift_date))
+            if not cur.fetchone():
+                cur.close(); conn.close()
+                return f"❌ Swap failed: **{req_name}** is no longer scheduled for **{req_shift_date}**. They may have already swapped it with someone else."
+
+            # 1. Update Roster
+            cur.execute("UPDATE roster_assignments SET engineer_id = %s WHERE engineer_id = %s AND shift_date = %s", (target_id, req_id, req_shift_date))
+            cur.execute("UPDATE roster_assignments SET engineer_id = %s WHERE engineer_id = %s AND shift_date = %s", (req_id, target_id, selected_return_shift))
+            
+            # 2. Update Swap Status
+            cur.execute("UPDATE shift_swaps SET status = 'accepted' WHERE id = %s", (swap_id,))
+            
+            # 3. Expire other pending requests Alice made for this shift
+            cur.execute("""
+                UPDATE shift_swaps 
+                SET status = 'expired' 
+                WHERE requester_id = %s AND requester_shift_date = %s AND status = 'pending' AND id != %s
+            """, (req_id, req_shift_date, swap_id))
+            
+            conn.commit()
+            bot_audit("SWAP_ACCEPTED", team_id=team_id, entity_id=swap_id)
+
+            # 4. Notify Alice & Admins
+            cur.execute("SELECT name FROM teams WHERE id = %s", (team_id,))
+            team_name = cur.fetchone()[0]
+
+            if bot_instance and req_email:
+                bot_instance.teams.messages.create(
+                    toPersonEmail=req_email, 
+                    markdown=f"🎉 **Swap Accepted!**\n\n{target_name} accepted your swap. You are now working **{selected_return_shift}** instead of **{req_shift_date}**."
+                )
+
+            admin_emails = get_team_admin_emails(team_id)
+            for admin_email in admin_emails:
+                if bot_instance:
+                    bot_instance.teams.messages.create(
+                        toPersonEmail=admin_email,
+                        markdown=f"🔄 **Shift Swap Completed**\n\n**{req_name}** and **{target_name}** have swapped shifts for your team **{team_name}**.\n- {target_name} is now working {req_shift_date}\n- {req_name} is now working {selected_return_shift}\n\nThe roster has been automatically updated."
+                    )
+
+            cur.close(); conn.close()
+            return f"✅ Swap successful! The roster has been updated for **{team_name}** and the Admin has been notified."
+
+class ClaimOpenSwapCommand(Command):
+    def __init__(self):
+        super().__init__(command_keyword="/claim_swap", help_message="Claim an open market shift swap.", card=None)
+
+    def execute(self, message, attachment_actions, activity):
+        sender = activity.get("personEmail") or activity.get("actor", {}).get("emailAddress")
+        
+        # The user types "/claim_swap 12", so we split the message to get the ID
+        parts = message.strip().split()
+        if len(parts) < 2 or not parts[1].isdigit():
+            return "⚠️ Invalid format. Please use `/claim_swap [ID]` (e.g., `/claim_swap 12`)."
+            
+        swap_id = int(parts[1])
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Identify the claimant
+        cur.execute("SELECT id, name, team_id FROM engineers WHERE webex_email = %s AND is_active = TRUE", (sender,))
+        eng = cur.fetchone()
+        if not eng:
+            cur.close(); conn.close()
+            return "⛔ Access Denied."
+            
+        claimant_id, claimant_name, claimant_team_id = eng
+
+        # Get the swap request
+        cur.execute("""
+            SELECT s.status, s.requester_id, s.requester_shift_date, s.acceptable_return_dates, s.team_id,
+                   r.name, r.webex_email
+            FROM shift_swaps s
+            JOIN engineers r ON s.requester_id = r.id
+            WHERE s.id = %s AND s.is_open_market = TRUE
+        """, (swap_id,))
+        swap = cur.fetchone()
+
+        if not swap or swap[0] != 'pending':
+            cur.close(); conn.close()
+            return "ℹ️ This open swap has already been claimed or expired."
+
+        status, req_id, req_shift_date, acceptable_dates, team_id, req_name, req_email = swap
+
+        if claimant_id == req_id:
+            cur.close(); conn.close()
+            return "⚠️ You cannot claim your own swap request."
+
+        if claimant_team_id != team_id:
+            cur.close(); conn.close()
+            return "⛔ You can only claim swaps for your own team."
+
+        # SECURITY CHECK: Does the claimant actually own any of the shifts Alice wants?
+        cur.execute("""
+            SELECT shift_date FROM roster_assignments 
+            WHERE engineer_id = %s AND shift_date = ANY(%s::date[])
+        """, (claimant_id, acceptable_dates))
+        owned_shifts = [r[0] for r in cur.fetchall()]
+
+        if not owned_shifts:
+            cur.close(); conn.close()
+            return f"❌ You cannot claim this swap because you are not scheduled to work on any of the dates **{req_name}** requested in return."
+
+        cur.close(); conn.close()
+
+        # Build Card to let them pick which shift they are giving up
+        choices = [{"title": d.strftime('%A, %d %b %Y'), "value": str(d)} for d in owned_shifts]
+        
+        card = {
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "type": "AdaptiveCard",
+                "version": "1.2",
+                "body": [
+                    {"type": "TextBlock", "text": "🔄 Claim Open Swap", "weight": "Bolder", "size": "Medium", "color": "Good"},
+                    {"type": "TextBlock", "text": f"You are claiming **{req_name}'s** shift on **{req_shift_date}**.", "wrap": True},
+                    {"type": "TextBlock", "text": "Which of your shifts will you give them in return?", "wrap": True},
+                    {"type": "Input.ChoiceSet", "id": "selected_return_shift", "choices": choices}
+                ],
+                "actions": [
+                    {"type": "Action.Submit", "title": "✅ Confirm Claim", "data": {"callback_keyword": "respond_swap", "action": "accept", "swap_id": swap_id}}
+                ]
+            }
+        }
+        r = Response()
+        r.text = "Claim Open Swap"
+        r.attachments = card
+        return r
+
 
 # ==========================================
 # 4. BACKGROUND TIMER JOB (Run every 5 mins)

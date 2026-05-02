@@ -8,7 +8,7 @@ from webex_bot.webex_bot import WebexBot
 from webex_bot.models.command import Command
 from webex_bot.models.response import Response
 from shift_swap import UnableToWorkCommand, SubmitReliefRequestCommand, ReliefResponseCommand, tick_relief_timers
-from shift_swap import InitiateSwapCommand, SelectSwapTargetCommand, SelectReturnShiftsCommand, SubmitSwapRequestCommand
+from shift_swap import InitiateSwapCommand, SelectSwapTargetCommand, SelectReturnShiftsCommand, SubmitSwapRequestCommand, RespondSwapCommand, ClaimOpenSwapCommand
 from audit_logger import audit_log
 
 load_dotenv()
@@ -1256,6 +1256,8 @@ if __name__ == "__main__":
     bot.add_command(SelectSwapTargetCommand())
     bot.add_command(SelectReturnShiftsCommand())
     bot.add_command(SubmitSwapRequestCommand())
+    bot.add_command(RespondSwapCommand())
+    bot.add_command(ClaimOpenSwapCommand())
     bot.add_command(RegisterTeamSpaceCommand())
     bot.add_command(SaveTeamSpaceCommand())
     scheduler = BackgroundScheduler()
