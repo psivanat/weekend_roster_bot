@@ -720,7 +720,7 @@ class SubmitSwapRequestCommand(Command):
             cur.close(); conn.close()
             return "⛔ Access Denied."
             
-            
+
         req_id, req_name, team_id = eng
         
         # --- NEW DEBUG PRINTS ---
@@ -742,22 +742,20 @@ class SubmitSwapRequestCommand(Command):
             space_id = cur.fetchone()[0]
             cur.close(); conn.close()
             
-            # --- HARD DEBUGGING PRINTS ---
-            print(f"[DEBUG-SWAP] Fetched space_id from DB for Team {team_id}: '{space_id}'")
+            # --- WEBEX CHAT DEBUGGING ---
+            debug_msg = f"🛠️ **DEBUG INFO:**\n- Team ID: {team_id}\n- Found Space ID: `{space_id}`"
+            if bot_instance:
+                bot_instance.teams.messages.create(toPersonEmail=sender, markdown=debug_msg)
             
             dates_str = ", ".join(return_dates)
             msg = f"📢 **Open Shift Swap!**\n\n**{req_name}** is offering their shift on **{my_shift_date_str}**.\nIn exchange, they are looking for a shift on: **{dates_str}**.\n\n*(To claim this, reply to the bot privately with `/claim_swap {swap_id}`)*"
             
             if bot_instance and space_id and space_id.strip() != "":
                 try:
-                    print(f"[DEBUG-SWAP] Attempting to send message to room...")
                     bot_instance.teams.messages.create(roomId=space_id.strip(), markdown=msg)
-                    print("[DEBUG-SWAP] Message sent successfully!")
                 except Exception as e:
-                    print(f"[CRITICAL-WEBEX-ERROR] Failed to post to Room ID. Error: {e}")
-                    return f"❌ Error: The swap was saved, but the bot could not post to the Team Space. (Is the bot a member of the space?)"
+                    return f"❌ Error: The swap was saved, but the bot could not post to the Team Space. Reason: {e}"
             else:
-                print("[DEBUG-SWAP] Skipping send. space_id is empty or None.")
                 return "⚠️ The swap was saved, but no valid Space ID was found in the database to broadcast it."
                 
             return "✅ Your Open Market swap has been broadcasted to the Team Space!"
