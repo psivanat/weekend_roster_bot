@@ -734,7 +734,13 @@ class SubmitSwapRequestCommand(Command):
             msg = f"📢 **Open Shift Swap!**\n\n**{req_name}** is offering their shift on **{my_shift_date_str}**.\nIn exchange, they are looking for a shift on: **{dates_str}**.\n\n*(To claim this, reply to the bot privately with `/claim_swap {swap_id}`)*"
             
             if bot_instance and space_id:
-                bot_instance.teams.messages.create(roomId=space_id, markdown=msg)
+                try:
+                    bot_instance.teams.messages.create(roomId=space_id, markdown=msg)
+                    print(f"SUCCESS: Broadcasted swap to Room ID {space_id}")
+                except Exception as e:
+                    print(f"CRITICAL WEBEX ERROR: Failed to post to Room ID {space_id}. Error: {e}")
+                    return f"❌ Error: The swap was saved, but the bot could not post to the Team Space. (Is the bot a member of the space?)"
+                    
             return "✅ Your Open Market swap has been broadcasted to the Team Space!"
 
         else:
