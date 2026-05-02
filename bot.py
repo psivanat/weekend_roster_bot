@@ -562,7 +562,7 @@ class HelloCommand(Command):
             {"type": "Action.Submit", "title": f"📝 Update Preferences ({display_month})", "data": {"callback_keyword": "step1_preferences"}},
             {"type": "Action.Submit", "title": "🔍 View My Submitted Preferences", "data": {"callback_keyword": "my_preferences"}},
             {"type": "Action.Submit", "title": "📆 View My Upcoming Shifts", "data": {"callback_keyword": "my_shifts"}},
-            {"type": "Action.Submit", "title": "🚨 Unable to Work (Request Relief)", "data": {"callback_keyword": "unable_to_work"}}
+            {"type": "Action.Submit", "title": "🚨 Unable to Work (Request Relief)", "data": {"callback_keyword": "unable_to_work"}},
             {"type": "Action.Submit", "title": "🔄 Request Shift Swap", "data": {"callback_keyword": "initiate_swap"}}
         ]
 
