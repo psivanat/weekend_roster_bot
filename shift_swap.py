@@ -730,19 +730,26 @@ class SubmitSwapRequestCommand(Command):
             space_id = cur.fetchone()[0]
             cur.close(); conn.close()
             
+            # --- HARD DEBUGGING PRINTS ---
+            print(f"[DEBUG-SWAP] Fetched space_id from DB: '{space_id}'")
+            
             dates_str = ", ".join(return_dates)
             msg = f"📢 **Open Shift Swap!**\n\n**{req_name}** is offering their shift on **{my_shift_date_str}**.\nIn exchange, they are looking for a shift on: **{dates_str}**.\n\n*(To claim this, reply to the bot privately with `/claim_swap {swap_id}`)*"
             
-            if bot_instance and space_id:
+            if bot_instance and space_id and space_id.strip() != "":
                 try:
-                    bot_instance.teams.messages.create(roomId=space_id, markdown=msg)
-                    print(f"SUCCESS: Broadcasted swap to Room ID {space_id}")
+                    print(f"[DEBUG-SWAP] Attempting to send message to room...")
+                    bot_instance.teams.messages.create(roomId=space_id.strip(), markdown=msg)
+                    print("[DEBUG-SWAP] Message sent successfully!")
                 except Exception as e:
-                    print(f"CRITICAL WEBEX ERROR: Failed to post to Room ID {space_id}. Error: {e}")
+                    print(f"[CRITICAL-WEBEX-ERROR] Failed to post to Room ID. Error: {e}")
                     return f"❌ Error: The swap was saved, but the bot could not post to the Team Space. (Is the bot a member of the space?)"
-                    
+            else:
+                print("[DEBUG-SWAP] Skipping send. space_id is empty or None.")
+                return "⚠️ The swap was saved, but no valid Space ID was found in the database to broadcast it."
+                
             return "✅ Your Open Market swap has been broadcasted to the Team Space!"
-
+        
         else:
             cur.execute("SELECT name, webex_email FROM engineers WHERE id = %s", (target_id,))
             target_name, target_email = cur.fetchone()
