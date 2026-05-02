@@ -511,11 +511,9 @@ class InitiateSwapCommand(Command):
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Fetch engineer and their team's shift_end_time
         cur.execute("""
             SELECT e.id, e.team_id, t.shift_end_time 
-            FROM engineers e 
-            JOIN teams t ON e.team_id = t.id 
+            FROM engineers e JOIN teams t ON e.team_id = t.id 
             WHERE e.webex_email = %s AND e.is_active = TRUE
         """, (sender,))
         eng = cur.fetchone()
@@ -526,7 +524,6 @@ class InitiateSwapCommand(Command):
             
         eng_id, team_id, shift_end_time = eng
 
-        # Get Alice's future shifts
         cur.execute("SELECT shift_date FROM roster_assignments WHERE engineer_id = %s AND shift_date > CURRENT_DATE ORDER BY shift_date", (eng_id,))
         all_future_shifts = cur.fetchall()
         cur.close(); conn.close()
@@ -582,7 +579,6 @@ class SelectSwapTargetCommand(Command):
         cur.execute("SELECT e.id, e.team_id, t.webex_space_id FROM engineers e JOIN teams t ON e.team_id = t.id WHERE e.webex_email = %s", (sender,))
         eng_id, team_id, space_id = cur.fetchone()
 
-        # Get colleagues NOT working on this date
         cur.execute("""
             SELECT id, name FROM engineers 
             WHERE team_id = %s AND id != %s AND is_active = TRUE
@@ -592,14 +588,13 @@ class SelectSwapTargetCommand(Command):
         colleagues = cur.fetchall()
         cur.close(); conn.close()
 
-        # Build Card 2 Choices with Pro-Tips (⭐)
         choices = []
         if space_id:
             choices.append({"title": "🌐 Anyone (Broadcast to Team Space)", "value": "OPEN_MARKET"})
             
         for c_id, c_name in colleagues:
-            safe = is_shift_safe(c_id, my_shift_date, team_id)
-            title = f"{c_name} ⭐ (Recommended)" if safe else c_name
+            target_safe = is_shift_safe(c_id, my_shift_date, team_id)
+            title = f"{c_name} — Safe Match" if target_safe else f"{c_name} — Warning: Breaks their rest rules"
             choices.append({"title": title, "value": str(c_id)})
 
         card = {
@@ -612,7 +607,6 @@ class SelectSwapTargetCommand(Command):
                     {"type": "TextBlock", "text": "🔄 Shift Swap (Step 2 of 3)", "weight": "Bolder", "size": "Medium"},
                     {"type": "TextBlock", "text": f"You are giving away: **{my_shift_date_str}**", "wrap": True},
                     {"type": "TextBlock", "text": "Who do you want to ask for a swap?", "wrap": True},
-                    {"type": "TextBlock", "text": "💡 Pro-Tip: Engineers marked with a ⭐ can take your shift without breaking the team's rest rules.", "wrap": True, "size": "Small", "color": "Good"},
                     {"type": "Input.ChoiceSet", "id": "target_id", "choices": choices}
                 ],
                 "actions": [{"type": "Action.Submit", "title": "Next ➡️", "data": {"callback_keyword": "select_return_shifts", "my_shift_date": my_shift_date_str}}]
@@ -634,6 +628,7 @@ class SelectReturnShiftsCommand(Command):
         target_id = inputs.get("target_id")
 
         if not target_id: return "⚠️ Please select a colleague or Open Market."
+        my_shift_date = datetime.strptime(my_shift_date_str, "%Y-%m-%d").date()
 
         conn = get_db_connection()
         cur = conn.cursor()
@@ -644,23 +639,33 @@ class SelectReturnShiftsCommand(Command):
         is_open = (target_id == "OPEN_MARKET")
 
         if is_open:
-            # Branch B: Open Market (Fetch all future weekends for the next 60 days)
             today = datetime.now().date()
             for i in range(1, 60):
                 d = today + timedelta(days=i)
                 if d.weekday() in [5, 6] and str(d) != my_shift_date_str:
-                    safe = is_shift_safe(eng_id, d, team_id)
-                    title = f"{d.strftime('%A, %d %b')} ⭐" if safe else d.strftime('%A, %d %b')
+                    alice_safe = is_shift_safe(eng_id, d, team_id)
+                    title = f"{d.strftime('%A, %d %b')} — Safe Match" if alice_safe else f"{d.strftime('%A, %d %b')} — Warning: Breaks your rest rules"
                     choices.append({"title": title, "value": str(d)})
             target_name = "the Team"
         else:
-            # Branch A: Direct Swap (Fetch Bob's shifts)
             cur.execute("SELECT name FROM engineers WHERE id = %s", (target_id,))
             target_name = cur.fetchone()[0]
+            
+            target_safe = is_shift_safe(target_id, my_shift_date, team_id)
+            
             cur.execute("SELECT shift_date FROM roster_assignments WHERE engineer_id = %s AND shift_date > CURRENT_DATE", (target_id,))
             for (d,) in cur.fetchall():
-                safe = is_shift_safe(eng_id, d, team_id)
-                title = f"{d.strftime('%A, %d %b')} ⭐" if safe else d.strftime('%A, %d %b')
+                alice_safe = is_shift_safe(eng_id, d, team_id)
+                
+                if alice_safe and target_safe:
+                    title = f"{d.strftime('%A, %d %b')} — Perfect Match"
+                elif not alice_safe and target_safe:
+                    title = f"{d.strftime('%A, %d %b')} — Warning: Breaks your rest rules"
+                elif alice_safe and not target_safe:
+                    title = f"{d.strftime('%A, %d %b')} — Warning: Breaks {target_name}'s rest rules"
+                else:
+                    title = f"{d.strftime('%A, %d %b')} — Warning: Breaks rules for both of you"
+                    
                 choices.append({"title": title, "value": str(d)})
 
         cur.close(); conn.close()
@@ -677,7 +682,6 @@ class SelectReturnShiftsCommand(Command):
                 "body": [
                     {"type": "TextBlock", "text": "🔄 Shift Swap (Step 3 of 3)", "weight": "Bolder", "size": "Medium"},
                     {"type": "TextBlock", "text": f"Select one or more shifts you are willing to take from **{target_name}** in return:", "wrap": True},
-                    {"type": "TextBlock", "text": "💡 Pro-Tip: Shifts marked with a ⭐ will not break your own rest rules.", "wrap": True, "size": "Small", "color": "Good"},
                     {"type": "Input.ChoiceSet", "id": "return_dates", "isMultiSelect": True, "choices": choices}
                 ],
                 "actions": [{"type": "Action.Submit", "title": "Send Swap Request", "data": {"callback_keyword": "submit_swap_request", "my_shift_date": my_shift_date_str, "target_id": target_id}}]
@@ -697,20 +701,20 @@ class SubmitSwapRequestCommand(Command):
         sender = activity.get("actor", {}).get("emailAddress")
         inputs = attachment_actions.inputs
         
-        my_shift_date = inputs.get("my_shift_date")
+        my_shift_date_str = inputs.get("my_shift_date")
         target_id = inputs.get("target_id")
         return_dates_raw = inputs.get("return_dates")
 
         if not return_dates_raw: return "⚠️ You must select at least one return shift."
         return_dates = [d.strip() for d in return_dates_raw.split(",")]
         is_open = (target_id == "OPEN_MARKET")
+        my_shift_date = datetime.strptime(my_shift_date_str, "%Y-%m-%d").date()
 
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("SELECT id, name, team_id FROM engineers WHERE webex_email = %s", (sender,))
         req_id, req_name, team_id = cur.fetchone()
 
-        # Save to DB
         db_target_id = None if is_open else target_id
         cur.execute("""
             INSERT INTO shift_swaps (team_id, requester_id, target_id, requester_shift_date, acceptable_return_dates, is_open_market)
@@ -722,26 +726,40 @@ class SubmitSwapRequestCommand(Command):
         bot_audit("SWAP_REQUESTED", team_id=team_id, entity_id=swap_id, details={"is_open": is_open})
 
         if is_open:
-            # POST TO TEAM SPACE
             cur.execute("SELECT webex_space_id FROM teams WHERE id = %s", (team_id,))
             space_id = cur.fetchone()[0]
+            cur.close(); conn.close()
             
             dates_str = ", ".join(return_dates)
-            msg = f"📢 **Open Shift Swap!**\n\n**{req_name}** is offering their shift on **{my_shift_date}**.\nIn exchange, they are looking for a shift on: **{dates_str}**.\n\n*(To claim this, reply to the bot privately with `/claim_swap {swap_id}`)*"
+            msg = f"📢 **Open Shift Swap!**\n\n**{req_name}** is offering their shift on **{my_shift_date_str}**.\nIn exchange, they are looking for a shift on: **{dates_str}**.\n\n*(To claim this, reply to the bot privately with `/claim_swap {swap_id}`)*"
             
             if bot_instance and space_id:
                 bot_instance.teams.messages.create(roomId=space_id, markdown=msg)
-            
-            cur.close(); conn.close()
             return "✅ Your Open Market swap has been broadcasted to the Team Space!"
 
         else:
-            # DIRECT MESSAGE TO BOB
             cur.execute("SELECT name, webex_email FROM engineers WHERE id = %s", (target_id,))
             target_name, target_email = cur.fetchone()
             cur.close(); conn.close()
 
-            bob_choices = [{"title": d, "value": d} for d in return_dates]
+            target_safe = is_shift_safe(target_id, my_shift_date, team_id)
+            bob_choices = []
+            
+            for d_str in return_dates:
+                d_obj = datetime.strptime(d_str, "%Y-%m-%d").date()
+                alice_safe = is_shift_safe(req_id, d_obj, team_id)
+                
+                if alice_safe and target_safe:
+                    title = f"{d_str} — Perfect Match"
+                elif not target_safe and alice_safe:
+                    title = f"{d_str} — Warning: Breaks your rest rules"
+                elif target_safe and not alice_safe:
+                    title = f"{d_str} — Warning: Breaks {req_name}'s rest rules"
+                else:
+                    title = f"{d_str} — Warning: Breaks rules for both of you"
+                
+                bob_choices.append({"title": title, "value": d_str})
+
             bob_card = {
                 "contentType": "application/vnd.microsoft.card.adaptive",
                 "content": {
@@ -750,7 +768,7 @@ class SubmitSwapRequestCommand(Command):
                     "version": "1.2",
                     "body": [
                         {"type": "TextBlock", "text": "🔄 Shift Swap Request", "weight": "Bolder", "size": "Medium", "color": "Attention"},
-                        {"type": "TextBlock", "text": f"**{req_name}** wants to give you their shift on **{my_shift_date}**.", "wrap": True},
+                        {"type": "TextBlock", "text": f"**{req_name}** wants to give you their shift on **{my_shift_date_str}**.", "wrap": True},
                         {"type": "TextBlock", "text": "In exchange, they will take one of these shifts from you. Which one will you give them?", "wrap": True},
                         {"type": "Input.ChoiceSet", "id": "selected_return_shift", "choices": bob_choices}
                     ],
@@ -765,12 +783,16 @@ class SubmitSwapRequestCommand(Command):
 
             return f"✅ Swap request sent to **{target_name}**. You will be notified when they respond."
 
+
 class RespondSwapCommand(Command):
     def __init__(self):
         super().__init__(command_keyword="respond_swap", help_message=None, card=None)
 
     def execute(self, message, attachment_actions, activity):
         from bot import bot_instance, get_team_admin_emails
+        
+        # 1. Identify who is clicking the button
+        sender = activity.get("actor", {}).get("emailAddress") or activity.get("personEmail")
         inputs = attachment_actions.inputs
         action = inputs.get("action")
         swap_id = inputs.get("swap_id")
@@ -779,12 +801,20 @@ class RespondSwapCommand(Command):
         conn = get_db_connection()
         cur = conn.cursor()
 
+        # Get the responder's details
+        cur.execute("SELECT id, name, webex_email FROM engineers WHERE webex_email = %s", (sender,))
+        responder = cur.fetchone()
+        if not responder:
+            cur.close(); conn.close()
+            return "⛔ Access Denied."
+        responder_id, responder_name, responder_email = responder
+
+        # 2. Fetch the swap request (Notice we removed the JOIN for the target engineer)
         cur.execute("""
-            SELECT s.status, s.requester_id, s.target_id, s.requester_shift_date, s.team_id,
-                   r.name, r.webex_email, t.name, t.webex_email
+            SELECT s.status, s.requester_id, s.target_id, s.requester_shift_date, s.team_id, s.is_open_market,
+                   r.name, r.webex_email
             FROM shift_swaps s
             JOIN engineers r ON s.requester_id = r.id
-            JOIN engineers t ON s.target_id = t.id
             WHERE s.id = %s
         """, (swap_id,))
         swap = cur.fetchone()
@@ -793,9 +823,29 @@ class RespondSwapCommand(Command):
             cur.close(); conn.close()
             return "ℹ️ This swap request has already been processed or expired."
 
-        status, req_id, target_id, req_shift_date, team_id, req_name, req_email, target_name, target_email = swap
+        status, req_id, db_target_id, req_shift_date, team_id, is_open_market, req_name, req_email = swap
 
+        # 3. Determine the Target dynamically
+        if is_open_market:
+            target_id = responder_id
+            target_name = responder_name
+            target_email = responder_email
+        else:
+            target_id = db_target_id
+            cur.execute("SELECT name, webex_email FROM engineers WHERE id = %s", (target_id,))
+            target_name, target_email = cur.fetchone()
+            
+            # Security: Only the intended target can respond to a direct swap
+            if responder_id != target_id:
+                cur.close(); conn.close()
+                return "⛔ You are not authorized to respond to this direct swap request."
+
+        # 4. Handle the Action
         if action == "decline":
+            if is_open_market:
+                cur.close(); conn.close()
+                return "ℹ️ You cancelled the open market claim."
+                
             cur.execute("UPDATE shift_swaps SET status = 'declined' WHERE id = %s", (swap_id,))
             conn.commit()
             bot_audit("SWAP_DECLINED", team_id=team_id, entity_id=swap_id)
@@ -817,14 +867,14 @@ class RespondSwapCommand(Command):
                 cur.close(); conn.close()
                 return f"❌ Swap failed: **{req_name}** is no longer scheduled for **{req_shift_date}**. They may have already swapped it with someone else."
 
-            # 1. Update Roster
+            # Update Roster
             cur.execute("UPDATE roster_assignments SET engineer_id = %s WHERE engineer_id = %s AND shift_date = %s", (target_id, req_id, req_shift_date))
             cur.execute("UPDATE roster_assignments SET engineer_id = %s WHERE engineer_id = %s AND shift_date = %s", (req_id, target_id, selected_return_shift))
             
-            # 2. Update Swap Status
-            cur.execute("UPDATE shift_swaps SET status = 'accepted' WHERE id = %s", (swap_id,))
+            # Update Swap Status (and fill in the target_id if it was open market)
+            cur.execute("UPDATE shift_swaps SET status = 'accepted', target_id = %s WHERE id = %s", (target_id, swap_id))
             
-            # 3. Expire other pending requests Alice made for this shift
+            # Expire other pending requests Alice made for this shift
             cur.execute("""
                 UPDATE shift_swaps 
                 SET status = 'expired' 
@@ -832,18 +882,19 @@ class RespondSwapCommand(Command):
             """, (req_id, req_shift_date, swap_id))
             
             conn.commit()
-            bot_audit("SWAP_ACCEPTED", team_id=team_id, entity_id=swap_id)
+            bot_audit("SWAP_ACCEPTED", team_id=team_id, entity_id=swap_id, details={"is_open_market": is_open_market})
 
-            # 4. Notify Alice & Admins
             cur.execute("SELECT name FROM teams WHERE id = %s", (team_id,))
             team_name = cur.fetchone()[0]
 
+            # Notify Alice
             if bot_instance and req_email:
                 bot_instance.teams.messages.create(
                     toPersonEmail=req_email, 
                     markdown=f"🎉 **Swap Accepted!**\n\n{target_name} accepted your swap. You are now working **{selected_return_shift}** instead of **{req_shift_date}**."
                 )
 
+            # Notify Admins
             admin_emails = get_team_admin_emails(team_id)
             for admin_email in admin_emails:
                 if bot_instance:
@@ -857,12 +908,11 @@ class RespondSwapCommand(Command):
 
 class ClaimOpenSwapCommand(Command):
     def __init__(self):
-        super().__init__(command_keyword="/claim_swap", help_message="Claim an open market shift swap.", card=None)
+        super().__init__(command_keyword="/claim_swap", help_message=None, card=None)
 
     def execute(self, message, attachment_actions, activity):
         sender = activity.get("personEmail") or activity.get("actor", {}).get("emailAddress")
         
-        # The user types "/claim_swap 12", so we split the message to get the ID
         parts = message.strip().split()
         if len(parts) < 2 or not parts[1].isdigit():
             return "⚠️ Invalid format. Please use `/claim_swap [ID]` (e.g., `/claim_swap 12`)."
@@ -872,7 +922,6 @@ class ClaimOpenSwapCommand(Command):
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Identify the claimant
         cur.execute("SELECT id, name, team_id FROM engineers WHERE webex_email = %s AND is_active = TRUE", (sender,))
         eng = cur.fetchone()
         if not eng:
@@ -881,7 +930,6 @@ class ClaimOpenSwapCommand(Command):
             
         claimant_id, claimant_name, claimant_team_id = eng
 
-        # Get the swap request
         cur.execute("""
             SELECT s.status, s.requester_id, s.requester_shift_date, s.acceptable_return_dates, s.team_id,
                    r.name, r.webex_email
@@ -905,7 +953,6 @@ class ClaimOpenSwapCommand(Command):
             cur.close(); conn.close()
             return "⛔ You can only claim swaps for your own team."
 
-        # SECURITY CHECK: Does the claimant actually own any of the shifts Alice wants?
         cur.execute("""
             SELECT shift_date FROM roster_assignments 
             WHERE engineer_id = %s AND shift_date = ANY(%s::date[])
@@ -916,11 +963,27 @@ class ClaimOpenSwapCommand(Command):
             cur.close(); conn.close()
             return f"❌ You cannot claim this swap because you are not scheduled to work on any of the dates **{req_name}** requested in return."
 
+        # Build Card with Pro-Tips
+        target_safe = is_shift_safe(claimant_id, req_shift_date, team_id)
+        choices = []
+        
+        for d in owned_shifts:
+            alice_safe = is_shift_safe(req_id, d, team_id)
+            d_str = d.strftime('%Y-%m-%d')
+            
+            if alice_safe and target_safe:
+                title = f"{d.strftime('%A, %d %b')} — Perfect Match"
+            elif not target_safe and alice_safe:
+                title = f"{d.strftime('%A, %d %b')} — Warning: Breaks your rest rules"
+            elif target_safe and not alice_safe:
+                title = f"{d.strftime('%A, %d %b')} — Warning: Breaks {req_name}'s rest rules"
+            else:
+                title = f"{d.strftime('%A, %d %b')} — Warning: Breaks rules for both of you"
+                
+            choices.append({"title": title, "value": d_str})
+
         cur.close(); conn.close()
 
-        # Build Card to let them pick which shift they are giving up
-        choices = [{"title": d.strftime('%A, %d %b %Y'), "value": str(d)} for d in owned_shifts]
-        
         card = {
             "contentType": "application/vnd.microsoft.card.adaptive",
             "content": {
@@ -934,6 +997,7 @@ class ClaimOpenSwapCommand(Command):
                     {"type": "Input.ChoiceSet", "id": "selected_return_shift", "choices": choices}
                 ],
                 "actions": [
+                    # We reuse the respond_swap logic! We just pass the claimant's ID as the target_id now.
                     {"type": "Action.Submit", "title": "✅ Confirm Claim", "data": {"callback_keyword": "respond_swap", "action": "accept", "swap_id": swap_id}}
                 ]
             }
