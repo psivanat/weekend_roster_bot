@@ -697,7 +697,6 @@ class SubmitSwapRequestCommand(Command):
         super().__init__(command_keyword="submit_swap_request", help_message=None, card=None)
 
     def execute(self, message, attachment_actions, activity):
-        from bot import bot_instance
         sender = activity.get("actor", {}).get("emailAddress")
         inputs = attachment_actions.inputs
         
@@ -713,19 +712,13 @@ class SubmitSwapRequestCommand(Command):
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # --- FIX: Ensure we only grab the ACTIVE profile, and limit to 1 ---
         cur.execute("SELECT id, name, team_id FROM engineers WHERE webex_email = %s AND is_active = TRUE LIMIT 1", (sender,))
         eng = cur.fetchone()
         if not eng:
             cur.close(); conn.close()
             return "⛔ Access Denied."
             
-
         req_id, req_name, team_id = eng
-        
-        # --- NEW DEBUG PRINTS ---
-        print(f"[DEBUG-SWAP] Found User: {req_name} (ID: {req_id})")
-        print(f"[DEBUG-SWAP] User belongs to Team ID: {team_id}")
 
         db_target_id = None if is_open else target_id
         cur.execute("""
@@ -737,23 +730,22 @@ class SubmitSwapRequestCommand(Command):
 
         bot_audit("SWAP_REQUESTED", team_id=team_id, entity_id=swap_id, details={"is_open": is_open})
 
+        # --- FIX: LAZY IMPORT ---
+        # We import the bot module here so it grabs the live, running instance
+        import bot 
+        active_bot = bot.bot_instance
+
         if is_open:
             cur.execute("SELECT webex_space_id FROM teams WHERE id = %s", (team_id,))
             space_id = cur.fetchone()[0]
             cur.close(); conn.close()
             
-            # --- WEBEX CHAT DEBUGGING ---
-            print(f"[DEBUG-SWAP] Fetched space_id from DB for Team {team_id}: '{space_id}'")
-            debug_msg = f"🛠️ **DEBUG INFO:**\n- Team ID: {team_id}\n- Found Space ID: `{space_id}`"
-            if bot_instance:
-                bot_instance.teams.messages.create(toPersonEmail=sender, markdown=debug_msg)
-            
             dates_str = ", ".join(return_dates)
             msg = f"📢 **Open Shift Swap!**\n\n**{req_name}** is offering their shift on **{my_shift_date_str}**.\nIn exchange, they are looking for a shift on: **{dates_str}**.\n\n*(To claim this, reply to the bot privately with `/claim_swap {swap_id}`)*"
             
-            if bot_instance and space_id and space_id.strip() != "":
+            if active_bot and space_id and space_id.strip() != "":
                 try:
-                    bot_instance.teams.messages.create(roomId=space_id.strip(), markdown=msg)
+                    active_bot.teams.messages.create(roomId=space_id.strip(), markdown=msg)
                 except Exception as e:
                     return f"❌ Error: The swap was saved, but the bot could not post to the Team Space. Reason: {e}"
             else:
@@ -802,8 +794,9 @@ class SubmitSwapRequestCommand(Command):
                     ]
                 }
             }
-            if bot_instance and target_email:
-                bot_instance.teams.messages.create(toPersonEmail=target_email, attachments=[bob_card])
+            
+            if active_bot and target_email:
+                active_bot.teams.messages.create(toPersonEmail=target_email, attachments=[bob_card])
 
             return f"✅ Swap request sent to **{target_name}**. You will be notified when they respond."
 
