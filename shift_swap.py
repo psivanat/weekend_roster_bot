@@ -122,27 +122,44 @@ class UnableToWorkCommand(Command):
         
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT id, name, team_id FROM engineers WHERE webex_email = %s AND is_active = TRUE", (sender,))
+        
+        cur.execute("""
+            SELECT e.id, e.name, e.team_id, t.shift_end_time 
+            FROM engineers e 
+            JOIN teams t ON e.team_id = t.id 
+            WHERE e.webex_email = %s AND e.is_active = TRUE
+        """, (sender,))
         eng = cur.fetchone()
         
         if not eng:
             cur.close(); conn.close()
             return "⛔ Access Denied."
             
-        eng_id, name, team_id = eng
+        eng_id, name, team_id, shift_end_time = eng
         
         if not is_within_shift_hours(team_id):
             cur.close(); conn.close()
             return "❌ Please initiate relief requests during active shift hours."
 
         cur.execute("SELECT shift_date FROM roster_assignments WHERE engineer_id = %s AND shift_date >= CURRENT_DATE ORDER BY shift_date", (eng_id,))
-        shifts = cur.fetchall()
+        all_future_shifts = cur.fetchall()
         cur.close(); conn.close()
 
-        if not shifts:
+        if not all_future_shifts:
             return "You have no upcoming shifts to request relief for."
 
-        choices = [{"title": d[0].strftime('%A, %d %b %Y'), "value": str(d[0])} for d in shifts]
+        # FILTER: Remove shifts where the Friday deadline has already passed
+        valid_shifts = []
+        now_ist = datetime.now(IST)
+        for (d,) in all_future_shifts:
+            deadline = get_friday_deadline(d, shift_end_time)
+            if now_ist <= deadline:
+                valid_shifts.append(d)
+
+        if not valid_shifts:
+            return "❌ The deadline to request automated relief for this weekend has passed. Please contact your Admin directly."
+
+        choices = [{"title": d.strftime('%A, %d %b %Y'), "value": str(d)} for d in valid_shifts]
 
         card = {
             "contentType": "application/vnd.microsoft.card.adaptive",
@@ -494,23 +511,41 @@ class InitiateSwapCommand(Command):
         conn = get_db_connection()
         cur = conn.cursor()
         
-        cur.execute("SELECT id, team_id FROM engineers WHERE webex_email = %s AND is_active = TRUE", (sender,))
+        # Fetch engineer and their team's shift_end_time
+        cur.execute("""
+            SELECT e.id, e.team_id, t.shift_end_time 
+            FROM engineers e 
+            JOIN teams t ON e.team_id = t.id 
+            WHERE e.webex_email = %s AND e.is_active = TRUE
+        """, (sender,))
         eng = cur.fetchone()
+        
         if not eng:
             cur.close(); conn.close()
             return "⛔ Access Denied."
             
-        eng_id, team_id = eng
+        eng_id, team_id, shift_end_time = eng
 
-        # Card 1: Get Alice's future shifts
+        # Get Alice's future shifts
         cur.execute("SELECT shift_date FROM roster_assignments WHERE engineer_id = %s AND shift_date > CURRENT_DATE ORDER BY shift_date", (eng_id,))
-        my_shifts = cur.fetchall()
+        all_future_shifts = cur.fetchall()
         cur.close(); conn.close()
         
-        if not my_shifts:
+        if not all_future_shifts:
             return "You have no upcoming shifts to swap."
 
-        shift_choices = [{"title": d[0].strftime('%A, %d %b %Y'), "value": str(d[0])} for d in my_shifts]
+        # FILTER: Remove shifts where the Friday deadline has already passed
+        valid_shifts = []
+        now_ist = datetime.now(IST)
+        for (d,) in all_future_shifts:
+            deadline = get_friday_deadline(d, shift_end_time)
+            if now_ist <= deadline:
+                valid_shifts.append(d)
+
+        if not valid_shifts:
+            return "❌ You have no upcoming shifts available to swap. (Shifts for this current weekend are already locked)."
+
+        shift_choices = [{"title": d.strftime('%A, %d %b %Y'), "value": str(d)} for d in valid_shifts]
 
         card = {
             "contentType": "application/vnd.microsoft.card.adaptive",
@@ -544,7 +579,7 @@ class SelectSwapTargetCommand(Command):
 
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT id, team_id, webex_space_id FROM engineers e JOIN teams t ON e.team_id = t.id WHERE e.webex_email = %s", (sender,))
+        cur.execute("SELECT e.id, e.team_id, t.webex_space_id FROM engineers e JOIN teams t ON e.team_id = t.id WHERE e.webex_email = %s", (sender,))
         eng_id, team_id, space_id = cur.fetchone()
 
         # Get colleagues NOT working on this date
