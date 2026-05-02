@@ -8,6 +8,7 @@ from webex_bot.webex_bot import WebexBot
 from webex_bot.models.command import Command
 from webex_bot.models.response import Response
 from shift_swap import UnableToWorkCommand, SubmitReliefRequestCommand, ReliefResponseCommand, tick_relief_timers
+from shift_swap import InitiateSwapCommand, SelectSwapTargetCommand, SelectReturnShiftsCommand, SubmitSwapRequestCommand
 from audit_logger import audit_log
 
 load_dotenv()
@@ -562,6 +563,7 @@ class HelloCommand(Command):
             {"type": "Action.Submit", "title": "🔍 View My Submitted Preferences", "data": {"callback_keyword": "my_preferences"}},
             {"type": "Action.Submit", "title": "📆 View My Upcoming Shifts", "data": {"callback_keyword": "my_shifts"}},
             {"type": "Action.Submit", "title": "🚨 Unable to Work (Request Relief)", "data": {"callback_keyword": "unable_to_work"}}
+            {"type": "Action.Submit", "title": "🔄 Request Shift Swap", "data": {"callback_keyword": "initiate_swap"}}
         ]
 
         body.append({"type": "ActionSet", "actions": actions})
@@ -1250,6 +1252,10 @@ if __name__ == "__main__":
     bot.add_command(UnableToWorkCommand())
     bot.add_command(SubmitReliefRequestCommand())
     bot.add_command(ReliefResponseCommand())
+    bot.add_command(InitiateSwapCommand())
+    bot.add_command(SelectSwapTargetCommand())
+    bot.add_command(SelectReturnShiftsCommand())
+    bot.add_command(SubmitSwapRequestCommand())
     bot.add_command(RegisterTeamSpaceCommand())
     bot.add_command(SaveTeamSpaceCommand())
     scheduler = BackgroundScheduler()

@@ -47,6 +47,43 @@ def get_team_admins_text(team_id):
     if not admins: return "your Admin"
     return " or ".join(admins)
 
+def is_shift_safe(engineer_id, shift_date, team_id):
+    """Checks if assigning this date to the engineer breaks any team rules. Returns True if safe (⭐)."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # Get Team Settings
+    cur.execute("SELECT strict_7_day_rest, allow_same_weekend FROM teams WHERE id = %s", (team_id,))
+    settings = cur.fetchone()
+    if not settings:
+        cur.close(); conn.close()
+        return True
+    strict_7_day, allow_same = settings
+
+    # Get Engineer's current shifts
+    cur.execute("SELECT shift_date FROM roster_assignments WHERE engineer_id = %s", (engineer_id,))
+    current_shifts = [r[0] for r in cur.fetchall()]
+    cur.close(); conn.close()
+
+    is_sat = shift_date.weekday() == 5
+    
+    # 1. Same Weekend Check
+    if not allow_same:
+        paired_day = shift_date + timedelta(days=1) if is_sat else shift_date - timedelta(days=1)
+        if paired_day in current_shifts:
+            return False
+
+    # 2. Strict 7-Day Rest Check
+    if strict_7_day:
+        if is_sat:
+            prev_sun = shift_date - timedelta(days=6)
+            if prev_sun in current_shifts: return False
+        else:
+            next_sat = shift_date + timedelta(days=6)
+            if next_sat in current_shifts: return False
+
+    return True
+
 def get_friday_deadline(shift_date, shift_end_time):
     # Find the Friday immediately preceding the shift_date
     days_to_subtract = (shift_date.weekday() - 4) % 7
@@ -443,6 +480,255 @@ def fail_relief_request(request_id, reason):
                 bot_instance.teams.messages.create(toPersonEmail=admin_email, markdown=msg)
             except Exception as e:
                 print(f"Failed to send relief failure alert to {admin_email}: {e}")
+
+# ==========================================
+# UNIFIED SHIFT SWAP (DIRECT & OPEN MARKET)
+# ==========================================
+
+class InitiateSwapCommand(Command):
+    def __init__(self):
+        super().__init__(command_keyword="initiate_swap", help_message=None, card=None)
+
+    def execute(self, message, attachment_actions, activity):
+        sender = activity.get("personEmail") or activity.get("actor", {}).get("emailAddress")
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute("SELECT id, team_id FROM engineers WHERE webex_email = %s AND is_active = TRUE", (sender,))
+        eng = cur.fetchone()
+        if not eng:
+            cur.close(); conn.close()
+            return "⛔ Access Denied."
+            
+        eng_id, team_id = eng
+
+        # Card 1: Get Alice's future shifts
+        cur.execute("SELECT shift_date FROM roster_assignments WHERE engineer_id = %s AND shift_date > CURRENT_DATE ORDER BY shift_date", (eng_id,))
+        my_shifts = cur.fetchall()
+        cur.close(); conn.close()
+        
+        if not my_shifts:
+            return "You have no upcoming shifts to swap."
+
+        shift_choices = [{"title": d[0].strftime('%A, %d %b %Y'), "value": str(d[0])} for d in my_shifts]
+
+        card = {
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "type": "AdaptiveCard",
+                "version": "1.2",
+                "body": [
+                    {"type": "TextBlock", "text": "🔄 Shift Swap (Step 1 of 3)", "weight": "Bolder", "size": "Medium"},
+                    {"type": "TextBlock", "text": "Which of your shifts do you want to give away?", "wrap": True},
+                    {"type": "Input.ChoiceSet", "id": "my_shift_date", "choices": shift_choices}
+                ],
+                "actions": [{"type": "Action.Submit", "title": "Next ➡️", "data": {"callback_keyword": "select_swap_target"}}]
+            }
+        }
+        r = Response()
+        r.text = "Swap Step 1"
+        r.attachments = card
+        return r
+
+class SelectSwapTargetCommand(Command):
+    def __init__(self):
+        super().__init__(command_keyword="select_swap_target", help_message=None, card=None)
+
+    def execute(self, message, attachment_actions, activity):
+        sender = activity.get("actor", {}).get("emailAddress")
+        my_shift_date_str = attachment_actions.inputs.get("my_shift_date")
+        if not my_shift_date_str: return "⚠️ Please select a shift."
+        
+        my_shift_date = datetime.strptime(my_shift_date_str, "%Y-%m-%d").date()
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id, team_id, webex_space_id FROM engineers e JOIN teams t ON e.team_id = t.id WHERE e.webex_email = %s", (sender,))
+        eng_id, team_id, space_id = cur.fetchone()
+
+        # Get colleagues NOT working on this date
+        cur.execute("""
+            SELECT id, name FROM engineers 
+            WHERE team_id = %s AND id != %s AND is_active = TRUE
+              AND id NOT IN (SELECT engineer_id FROM roster_assignments WHERE shift_date = %s)
+            ORDER BY name
+        """, (team_id, eng_id, my_shift_date))
+        colleagues = cur.fetchall()
+        cur.close(); conn.close()
+
+        # Build Card 2 Choices with Pro-Tips (⭐)
+        choices = []
+        if space_id:
+            choices.append({"title": "🌐 Anyone (Broadcast to Team Space)", "value": "OPEN_MARKET"})
+            
+        for c_id, c_name in colleagues:
+            safe = is_shift_safe(c_id, my_shift_date, team_id)
+            title = f"{c_name} ⭐ (Recommended)" if safe else c_name
+            choices.append({"title": title, "value": str(c_id)})
+
+        card = {
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "type": "AdaptiveCard",
+                "version": "1.2",
+                "body": [
+                    {"type": "TextBlock", "text": "🔄 Shift Swap (Step 2 of 3)", "weight": "Bolder", "size": "Medium"},
+                    {"type": "TextBlock", "text": f"You are giving away: **{my_shift_date_str}**", "wrap": True},
+                    {"type": "TextBlock", "text": "Who do you want to ask for a swap?", "wrap": True},
+                    {"type": "TextBlock", "text": "💡 Pro-Tip: Engineers marked with a ⭐ can take your shift without breaking the team's rest rules.", "wrap": True, "size": "Small", "color": "Good"},
+                    {"type": "Input.ChoiceSet", "id": "target_id", "choices": choices}
+                ],
+                "actions": [{"type": "Action.Submit", "title": "Next ➡️", "data": {"callback_keyword": "select_return_shifts", "my_shift_date": my_shift_date_str}}]
+            }
+        }
+        r = Response()
+        r.text = "Swap Step 2"
+        r.attachments = card
+        return r
+
+class SelectReturnShiftsCommand(Command):
+    def __init__(self):
+        super().__init__(command_keyword="select_return_shifts", help_message=None, card=None)
+
+    def execute(self, message, attachment_actions, activity):
+        sender = activity.get("actor", {}).get("emailAddress")
+        inputs = attachment_actions.inputs
+        my_shift_date_str = inputs.get("my_shift_date")
+        target_id = inputs.get("target_id")
+
+        if not target_id: return "⚠️ Please select a colleague or Open Market."
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id, team_id FROM engineers WHERE webex_email = %s", (sender,))
+        eng_id, team_id = cur.fetchone()
+
+        choices = []
+        is_open = (target_id == "OPEN_MARKET")
+
+        if is_open:
+            # Branch B: Open Market (Fetch all future weekends for the next 60 days)
+            today = datetime.now().date()
+            for i in range(1, 60):
+                d = today + timedelta(days=i)
+                if d.weekday() in [5, 6] and str(d) != my_shift_date_str:
+                    safe = is_shift_safe(eng_id, d, team_id)
+                    title = f"{d.strftime('%A, %d %b')} ⭐" if safe else d.strftime('%A, %d %b')
+                    choices.append({"title": title, "value": str(d)})
+            target_name = "the Team"
+        else:
+            # Branch A: Direct Swap (Fetch Bob's shifts)
+            cur.execute("SELECT name FROM engineers WHERE id = %s", (target_id,))
+            target_name = cur.fetchone()[0]
+            cur.execute("SELECT shift_date FROM roster_assignments WHERE engineer_id = %s AND shift_date > CURRENT_DATE", (target_id,))
+            for (d,) in cur.fetchall():
+                safe = is_shift_safe(eng_id, d, team_id)
+                title = f"{d.strftime('%A, %d %b')} ⭐" if safe else d.strftime('%A, %d %b')
+                choices.append({"title": title, "value": str(d)})
+
+        cur.close(); conn.close()
+
+        if not choices:
+            return f"❌ {target_name} has no available shifts to trade."
+
+        card = {
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "type": "AdaptiveCard",
+                "version": "1.2",
+                "body": [
+                    {"type": "TextBlock", "text": "🔄 Shift Swap (Step 3 of 3)", "weight": "Bolder", "size": "Medium"},
+                    {"type": "TextBlock", "text": f"Select one or more shifts you are willing to take from **{target_name}** in return:", "wrap": True},
+                    {"type": "TextBlock", "text": "💡 Pro-Tip: Shifts marked with a ⭐ will not break your own rest rules.", "wrap": True, "size": "Small", "color": "Good"},
+                    {"type": "Input.ChoiceSet", "id": "return_dates", "isMultiSelect": True, "choices": choices}
+                ],
+                "actions": [{"type": "Action.Submit", "title": "Send Swap Request", "data": {"callback_keyword": "submit_swap_request", "my_shift_date": my_shift_date_str, "target_id": target_id}}]
+            }
+        }
+        r = Response()
+        r.text = "Swap Step 3"
+        r.attachments = card
+        return r
+
+class SubmitSwapRequestCommand(Command):
+    def __init__(self):
+        super().__init__(command_keyword="submit_swap_request", help_message=None, card=None)
+
+    def execute(self, message, attachment_actions, activity):
+        from bot import bot_instance
+        sender = activity.get("actor", {}).get("emailAddress")
+        inputs = attachment_actions.inputs
+        
+        my_shift_date = inputs.get("my_shift_date")
+        target_id = inputs.get("target_id")
+        return_dates_raw = inputs.get("return_dates")
+
+        if not return_dates_raw: return "⚠️ You must select at least one return shift."
+        return_dates = [d.strip() for d in return_dates_raw.split(",")]
+        is_open = (target_id == "OPEN_MARKET")
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id, name, team_id FROM engineers WHERE webex_email = %s", (sender,))
+        req_id, req_name, team_id = cur.fetchone()
+
+        # Save to DB
+        db_target_id = None if is_open else target_id
+        cur.execute("""
+            INSERT INTO shift_swaps (team_id, requester_id, target_id, requester_shift_date, acceptable_return_dates, is_open_market)
+            VALUES (%s, %s, %s, %s, %s::date[], %s) RETURNING id
+        """, (team_id, req_id, db_target_id, my_shift_date, return_dates, is_open))
+        swap_id = cur.fetchone()[0]
+        conn.commit()
+
+        bot_audit("SWAP_REQUESTED", team_id=team_id, entity_id=swap_id, details={"is_open": is_open})
+
+        if is_open:
+            # POST TO TEAM SPACE
+            cur.execute("SELECT webex_space_id FROM teams WHERE id = %s", (team_id,))
+            space_id = cur.fetchone()[0]
+            
+            dates_str = ", ".join(return_dates)
+            msg = f"📢 **Open Shift Swap!**\n\n**{req_name}** is offering their shift on **{my_shift_date}**.\nIn exchange, they are looking for a shift on: **{dates_str}**.\n\n*(To claim this, reply to the bot privately with `/claim_swap {swap_id}`)*"
+            
+            if bot_instance and space_id:
+                bot_instance.teams.messages.create(roomId=space_id, markdown=msg)
+            
+            cur.close(); conn.close()
+            return "✅ Your Open Market swap has been broadcasted to the Team Space!"
+
+        else:
+            # DIRECT MESSAGE TO BOB
+            cur.execute("SELECT name, webex_email FROM engineers WHERE id = %s", (target_id,))
+            target_name, target_email = cur.fetchone()
+            cur.close(); conn.close()
+
+            bob_choices = [{"title": d, "value": d} for d in return_dates]
+            bob_card = {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": "1.2",
+                    "body": [
+                        {"type": "TextBlock", "text": "🔄 Shift Swap Request", "weight": "Bolder", "size": "Medium", "color": "Attention"},
+                        {"type": "TextBlock", "text": f"**{req_name}** wants to give you their shift on **{my_shift_date}**.", "wrap": True},
+                        {"type": "TextBlock", "text": "In exchange, they will take one of these shifts from you. Which one will you give them?", "wrap": True},
+                        {"type": "Input.ChoiceSet", "id": "selected_return_shift", "choices": bob_choices}
+                    ],
+                    "actions": [
+                        {"type": "Action.Submit", "title": "✅ Accept Swap", "data": {"callback_keyword": "respond_swap", "action": "accept", "swap_id": swap_id}},
+                        {"type": "Action.Submit", "title": "❌ Decline", "data": {"callback_keyword": "respond_swap", "action": "decline", "swap_id": swap_id}}
+                    ]
+                }
+            }
+            if bot_instance and target_email:
+                bot_instance.teams.messages.create(toPersonEmail=target_email, attachments=[bob_card])
+
+            return f"✅ Swap request sent to **{target_name}**. You will be notified when they respond."
 
 
 # ==========================================
