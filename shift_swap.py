@@ -712,8 +712,19 @@ class SubmitSwapRequestCommand(Command):
 
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT id, name, team_id FROM engineers WHERE webex_email = %s", (sender,))
-        req_id, req_name, team_id = cur.fetchone()
+        
+        # --- FIX: Ensure we only grab the ACTIVE profile, and limit to 1 ---
+        cur.execute("SELECT id, name, team_id FROM engineers WHERE webex_email = %s AND is_active = TRUE LIMIT 1", (sender,))
+        eng = cur.fetchone()
+        if not eng:
+            cur.close(); conn.close()
+            return "⛔ Access Denied."
+            
+        req_id, req_name, team_id = eng
+        
+        # --- NEW DEBUG PRINTS ---
+        print(f"[DEBUG-SWAP] Found User: {req_name} (ID: {req_id})")
+        print(f"[DEBUG-SWAP] User belongs to Team ID: {team_id}")
 
         db_target_id = None if is_open else target_id
         cur.execute("""
@@ -731,7 +742,7 @@ class SubmitSwapRequestCommand(Command):
             cur.close(); conn.close()
             
             # --- HARD DEBUGGING PRINTS ---
-            print(f"[DEBUG-SWAP] Fetched space_id from DB: '{space_id}'")
+            print(f"[DEBUG-SWAP] Fetched space_id from DB for Team {team_id}: '{space_id}'")
             
             dates_str = ", ".join(return_dates)
             msg = f"📢 **Open Shift Swap!**\n\n**{req_name}** is offering their shift on **{my_shift_date_str}**.\nIn exchange, they are looking for a shift on: **{dates_str}**.\n\n*(To claim this, reply to the bot privately with `/claim_swap {swap_id}`)*"
