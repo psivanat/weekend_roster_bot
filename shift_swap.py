@@ -743,6 +743,7 @@ class SubmitSwapRequestCommand(Command):
             cur.close(); conn.close()
             
             # --- WEBEX CHAT DEBUGGING ---
+            print(f"[DEBUG-SWAP] Fetched space_id from DB for Team {team_id}: '{space_id}'")
             debug_msg = f"🛠️ **DEBUG INFO:**\n- Team ID: {team_id}\n- Found Space ID: `{space_id}`"
             if bot_instance:
                 bot_instance.teams.messages.create(toPersonEmail=sender, markdown=debug_msg)
