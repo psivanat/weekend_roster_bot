@@ -720,6 +720,7 @@ class SubmitSwapRequestCommand(Command):
             cur.close(); conn.close()
             return "⛔ Access Denied."
             
+            
         req_id, req_name, team_id = eng
         
         # --- NEW DEBUG PRINTS ---
