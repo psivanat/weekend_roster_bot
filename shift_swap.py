@@ -740,12 +740,20 @@ class SubmitSwapRequestCommand(Command):
             space_id = cur.fetchone()[0]
             cur.close(); conn.close()
             
+            # --- EXTREME DEBUGGING: Print the raw type and value to Webex ---
+            import bot 
+            active_bot = bot.bot_instance
+            
+            debug_msg = f"🛠️ **EXTREME DEBUG:**\n- Team ID: {team_id}\n- Raw Space ID: `{repr(space_id)}`\n- Type: {type(space_id)}"
+            if active_bot:
+                active_bot.teams.messages.create(toPersonEmail=sender, markdown=debug_msg)
+            
             dates_str = ", ".join(return_dates)
             msg = f"📢 **Open Shift Swap!**\n\n**{req_name}** is offering their shift on **{my_shift_date_str}**.\nIn exchange, they are looking for a shift on: **{dates_str}**.\n\n*(To claim this, reply to the bot privately with `/claim_swap {swap_id}`)*"
             
-            if active_bot and space_id and space_id.strip() != "":
+            if active_bot and space_id and str(space_id).strip() != "" and str(space_id) != "None":
                 try:
-                    active_bot.teams.messages.create(roomId=space_id.strip(), markdown=msg)
+                    active_bot.teams.messages.create(roomId=str(space_id).strip(), markdown=msg)
                 except Exception as e:
                     return f"❌ Error: The swap was saved, but the bot could not post to the Team Space. Reason: {e}"
             else:
