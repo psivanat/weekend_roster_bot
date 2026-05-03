@@ -747,14 +747,12 @@ class SubmitSwapRequestCommand(Command):
 
         bot_audit("SWAP_REQUESTED", team_id=team_id, entity_id=swap_id, details={"is_open": is_open})
 
-        # --- THE FIX: USE RAW WEBEX API INSTEAD OF ACTIVE_BOT ---
         from webexpythonsdk import WebexAPI
         import os
         temp_api = WebexAPI(access_token=os.getenv("WEBEX_BOT_TOKEN"))
 
         if is_open:
             # --- SMART OPEN MARKET: TARGETED BLAST ---
-            # 1. Find the "Perfect Fits"
             cur.execute("""
                 SELECT e.id, e.name, e.webex_email, r.shift_date 
                 FROM engineers e
@@ -766,17 +764,16 @@ class SubmitSwapRequestCommand(Command):
 
             perfect_fits = []
             for t_id, t_name, t_email, t_shift in potential_targets:
-                # Check if the swap is 100% safe for BOTH people
                 target_safe = is_shift_safe(t_id, my_shift_date, team_id)
                 alice_safe = is_shift_safe(req_id, t_shift, team_id)
                 
                 if target_safe and alice_safe:
                     perfect_fits.append((t_id, t_name, t_email, t_shift))
 
+            sent_count = 0
             if perfect_fits:
-                # 2. Send DMs to all Perfect Fits
-                sent_count = 0
                 for t_id, t_name, t_email, t_shift in perfect_fits:
+                    # Create shadow swap
                     cur.execute("""
                         INSERT INTO shift_swaps (team_id, requester_id, target_id, requester_shift_date, acceptable_return_dates, is_open_market, parent_swap_id)
                         VALUES (%s, %s, %s, %s, %s::date[], FALSE, %s) RETURNING id
@@ -805,16 +802,16 @@ class SubmitSwapRequestCommand(Command):
                         temp_api.messages.create(toPersonEmail=t_email, attachments=[card])
                         sent_count += 1
                     except Exception:
-                        pass
-                
+                        # If the message fails to send, delete the shadow swap we just created
+                        cur.execute("DELETE FROM shift_swaps WHERE id = %s", (shadow_swap_id,))
+
+            if sent_count > 0:
                 conn.commit()
                 cur.close(); conn.close()
                 return f"✅ Your swap request has been sent directly to **{sent_count}** engineers who are a perfect match.\n\nIf no one accepts within 2 hours, it will be broadcasted to the whole Team Space."
 
             else:
-                # 3. No Perfect Fits Found -> Broadcast Immediately
-                
-                # --- THE ULTIMATE SPACE ID FETCH ---
+                # 3. No Perfect Fits Found (or all DMs failed) -> Broadcast Immediately
                 cur.execute("SELECT webex_space_id FROM teams WHERE id = %s", (team_id,))
                 res = cur.fetchone()
                 space_id = res[0] if res else None
@@ -832,11 +829,10 @@ class SubmitSwapRequestCommand(Command):
                     if res_admin:
                         space_id = res_admin[0]
                         
+                conn.commit() # Commit any shadow swap deletions
                 cur.close(); conn.close()
                 
                 dates_str = ", ".join(return_dates)
-                
-                # --- THE ADAPTIVE CARD BROADCAST ---
                 broadcast_card = {
                     "contentType": "application/vnd.microsoft.card.adaptive",
                     "content": {
@@ -924,7 +920,6 @@ class SubmitSwapRequestCommand(Command):
                     pass
 
             return f"✅ Swap request sent to **{target_name}**. You will be notified when they respond."
-
 
 class RespondSwapCommand(Command):
     def __init__(self):
