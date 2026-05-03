@@ -747,10 +747,10 @@ class SubmitSwapRequestCommand(Command):
 
         bot_audit("SWAP_REQUESTED", team_id=team_id, entity_id=swap_id, details={"is_open": is_open})
 
-        # --- FIX: LAZY IMPORT ---
-        # We import the bot module here so it grabs the live, running instance
-        import bot 
-        active_bot = bot.bot_instance
+        # --- THE FIX: USE RAW WEBEX API INSTEAD OF ACTIVE_BOT ---
+        from webexpythonsdk import WebexAPI
+        import os
+        temp_api = WebexAPI(access_token=os.getenv("WEBEX_BOT_TOKEN"))
 
         if is_open:
             # --- SMART OPEN MARKET: TARGETED BLAST ---
@@ -773,14 +773,10 @@ class SubmitSwapRequestCommand(Command):
                 if target_safe and alice_safe:
                     perfect_fits.append((t_id, t_name, t_email, t_shift))
 
-            import bot 
-            active_bot = bot.bot_instance
-
-            if perfect_fits and active_bot:
+            if perfect_fits:
                 # 2. Send DMs to all Perfect Fits
                 sent_count = 0
                 for t_id, t_name, t_email, t_shift in perfect_fits:
-                    # We create a "shadow" direct swap record for each person so they can respond
                     cur.execute("""
                         INSERT INTO shift_swaps (team_id, requester_id, target_id, requester_shift_date, acceptable_return_dates, is_open_market, parent_swap_id)
                         VALUES (%s, %s, %s, %s, %s::date[], FALSE, %s) RETURNING id
@@ -806,7 +802,7 @@ class SubmitSwapRequestCommand(Command):
                         }
                     }
                     try:
-                        active_bot.teams.messages.create(toPersonEmail=t_email, attachments=[card])
+                        temp_api.messages.create(toPersonEmail=t_email, attachments=[card])
                         sent_count += 1
                     except Exception:
                         pass
@@ -817,24 +813,69 @@ class SubmitSwapRequestCommand(Command):
 
             else:
                 # 3. No Perfect Fits Found -> Broadcast Immediately
+                
+                # --- THE ULTIMATE SPACE ID FETCH ---
                 cur.execute("SELECT webex_space_id FROM teams WHERE id = %s", (team_id,))
                 res = cur.fetchone()
                 space_id = res[0] if res else None
+                
+                if not space_id:
+                    cur.execute("""
+                        SELECT t.webex_space_id 
+                        FROM teams t
+                        JOIN user_teams ut ON t.id = ut.team_id
+                        JOIN users u ON ut.user_id = u.id
+                        WHERE u.email = %s AND t.webex_space_id IS NOT NULL
+                        LIMIT 1
+                    """, (sender,))
+                    res_admin = cur.fetchone()
+                    if res_admin:
+                        space_id = res_admin[0]
+                        
                 cur.close(); conn.close()
                 
                 dates_str = ", ".join(return_dates)
-                msg = f"📢 **Open Shift Swap!**\n\n**{req_name}** is offering their shift on **{my_shift_date_str}**.\nIn exchange, they are looking for a shift on: **{dates_str}**.\n\n*(To claim this, reply to the bot privately with `/claim_swap {swap_id}`)*"
                 
-                if active_bot and space_id and str(space_id).strip() != "" and str(space_id) != "None":
+                # --- THE ADAPTIVE CARD BROADCAST ---
+                broadcast_card = {
+                    "contentType": "application/vnd.microsoft.card.adaptive",
+                    "content": {
+                        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                        "type": "AdaptiveCard",
+                        "version": "1.2",
+                        "body": [
+                            {"type": "TextBlock", "text": "📢 Open Shift Swap!", "weight": "Bolder", "size": "Medium", "color": "Attention"},
+                            {"type": "TextBlock", "text": f"**{req_name}** is offering their shift on **{my_shift_date_str}**.", "wrap": True},
+                            {"type": "TextBlock", "text": f"In exchange, they are looking for a shift on:\n**{dates_str}**", "wrap": True}
+                        ],
+                        "actions": [
+                            {
+                                "type": "Action.Submit", 
+                                "title": "✋ Claim this Shift", 
+                                "data": {
+                                    "callback_keyword": "claim_open_swap_button", 
+                                    "swap_id": swap_id
+                                }
+                            }
+                        ]
+                    }
+                }
+                
+                if space_id and str(space_id).strip() != "" and str(space_id) != "None":
                     try:
-                        active_bot.teams.messages.create(roomId=str(space_id).strip(), markdown=msg)
+                        temp_api.messages.create(
+                            roomId=str(space_id).strip(), 
+                            text="Open Shift Swap Available!", 
+                            attachments=[broadcast_card]
+                        )
                         return "✅ No perfect matches were found, so your swap has been broadcasted to the Team Space!"
                     except Exception as e:
                         return f"❌ Error: The swap was saved, but the bot could not post to the Team Space. Reason: {e}"
                 else:
-                    return "⚠️ No perfect matches were found, and no valid Space ID was found to broadcast the offer."
+                    return f"⚠️ No perfect matches were found, and no valid Space ID was found in the database for Team {team_id} to broadcast the offer."
         
         else:
+            # --- DIRECT SWAP ---
             cur.execute("SELECT name, webex_email FROM engineers WHERE id = %s", (target_id,))
             target_name, target_email = cur.fetchone()
             cur.close(); conn.close()
@@ -876,8 +917,11 @@ class SubmitSwapRequestCommand(Command):
                 }
             }
             
-            if active_bot and target_email:
-                active_bot.teams.messages.create(toPersonEmail=target_email, attachments=[bob_card])
+            if target_email:
+                try:
+                    temp_api.messages.create(toPersonEmail=target_email, attachments=[bob_card])
+                except Exception:
+                    pass
 
             return f"✅ Swap request sent to **{target_name}**. You will be notified when they respond."
 
