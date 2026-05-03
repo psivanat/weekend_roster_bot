@@ -622,6 +622,7 @@ class SelectReturnShiftsCommand(Command):
         super().__init__(command_keyword="select_return_shifts", help_message=None, card=None)
 
     def execute(self, message, attachment_actions, activity):
+        import calendar
         sender = activity.get("actor", {}).get("emailAddress")
         inputs = attachment_actions.inputs
         my_shift_date_str = inputs.get("my_shift_date")
@@ -639,15 +640,31 @@ class SelectReturnShiftsCommand(Command):
         is_open = (target_id == "OPEN_MARKET")
 
         if is_open:
+            # Branch B: Open Market (Fetch weekends for the SAME MONTH as the shift being given away)
+            target_year = my_shift_date.year
+            target_month = my_shift_date.month
+            
+            # Get all weekend dates for that specific month
+            month_weekends = []
+            for day in calendar.Calendar().itermonthdates(target_year, target_month):
+                if day.month == target_month and day.weekday() in [5, 6]:
+                    month_weekends.append(day)
+            
+            # Get Alice's current schedule so we can filter out days she is already working
+            cur.execute("SELECT shift_date FROM roster_assignments WHERE engineer_id = %s AND TO_CHAR(shift_date, 'YYYY-MM') = %s", (eng_id, f"{target_year}-{target_month:02d}"))
+            alices_current_shifts = [r[0] for r in cur.fetchall()]
+            
             today = datetime.now().date()
-            for i in range(1, 60):
-                d = today + timedelta(days=i)
-                if d.weekday() in [5, 6] and str(d) != my_shift_date_str:
+            for d in month_weekends:
+                # Only show future dates, that are NOT the shift she is giving away, and NOT a shift she is already working
+                if d > today and d != my_shift_date and d not in alices_current_shifts:
                     alice_safe = is_shift_safe(eng_id, d, team_id)
                     title = f"{d.strftime('%A, %d %b')} — Safe Match" if alice_safe else f"{d.strftime('%A, %d %b')} — Warning: Breaks your rest rules"
                     choices.append({"title": title, "value": str(d)})
+                    
             target_name = "the Team"
         else:
+            # Branch A: Direct Swap
             cur.execute("SELECT name FROM engineers WHERE id = %s", (target_id,))
             target_name = cur.fetchone()[0]
             
@@ -757,17 +774,45 @@ class SubmitSwapRequestCommand(Command):
                     
             cur.close(); conn.close()
             
+            # --- NEW: Build the Adaptive Card ---
             dates_str = ", ".join(return_dates)
-            msg = f"📢 **Open Shift Swap!**\n\n**{req_name}** is offering their shift on **{my_shift_date_str}**.\nIn exchange, they are looking for a shift on: **{dates_str}**.\n\n*(To claim this, reply to the bot privately with `/claim_swap {swap_id}`)*"
             
-            # --- THE FIX: Bypass bot_instance and use the raw Webex API ---
+            broadcast_card = {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": "1.2",
+                    "body": [
+                        {"type": "TextBlock", "text": "📢 Open Shift Swap!", "weight": "Bolder", "size": "Medium", "color": "Attention"},
+                        {"type": "TextBlock", "text": f"**{req_name}** is offering their shift on **{my_shift_date_str}**.", "wrap": True},
+                        {"type": "TextBlock", "text": f"In exchange, they are looking for a shift on:\n**{dates_str}**", "wrap": True}
+                    ],
+                    "actions": [
+                        {
+                            "type": "Action.Submit", 
+                            "title": "✋ Claim this Shift", 
+                            "data": {
+                                "callback_keyword": "claim_open_swap_button", 
+                                "swap_id": swap_id
+                            }
+                        }
+                    ]
+                }
+            }
+            
             if space_id and str(space_id).strip() != "" and str(space_id) != "None":
                 try:
                     from webexpythonsdk import WebexAPI
                     import os
-                    # Create a fresh, temporary API connection just to send this one message
                     temp_api = WebexAPI(access_token=os.getenv("WEBEX_BOT_TOKEN"))
-                    temp_api.messages.create(roomId=str(space_id).strip(), markdown=msg)
+                    
+                    # Send the Card instead of Markdown text
+                    temp_api.messages.create(
+                        roomId=str(space_id).strip(), 
+                        text="Open Shift Swap Available!", # Fallback text for mobile notifications
+                        attachments=[broadcast_card]
+                    )
                 except Exception as e:
                     return f"❌ Error: The swap was saved, but the bot could not post to the Team Space. Reason: {e}"
             else:
@@ -947,16 +992,18 @@ class RespondSwapCommand(Command):
 
 class ClaimOpenSwapCommand(Command):
     def __init__(self):
-        super().__init__(command_keyword="/claim_swap", help_message=None, card=None)
+        # We change the keyword to match the button's data payload!
+        super().__init__(command_keyword="claim_open_swap_button", help_message=None, card=None)
 
     def execute(self, message, attachment_actions, activity):
         sender = activity.get("personEmail") or activity.get("actor", {}).get("emailAddress")
         
-        parts = message.strip().split()
-        if len(parts) < 2 or not parts[1].isdigit():
-            return "⚠️ Invalid format. Please use `/claim_swap [ID]` (e.g., `/claim_swap 12`)."
-            
-        swap_id = int(parts[1])
+        # Grab the swap_id directly from the button click!
+        inputs = attachment_actions.inputs if attachment_actions else {}
+        swap_id = inputs.get("swap_id")
+        
+        if not swap_id:
+            return "⚠️ Error: Could not read the Swap ID from the button."
 
         conn = get_db_connection()
         cur = conn.cursor()
@@ -1002,7 +1049,6 @@ class ClaimOpenSwapCommand(Command):
             cur.close(); conn.close()
             return f"❌ You cannot claim this swap because you are not scheduled to work on any of the dates **{req_name}** requested in return."
 
-        # Build Card with Pro-Tips
         target_safe = is_shift_safe(claimant_id, req_shift_date, team_id)
         choices = []
         
@@ -1036,7 +1082,6 @@ class ClaimOpenSwapCommand(Command):
                     {"type": "Input.ChoiceSet", "id": "selected_return_shift", "choices": choices}
                 ],
                 "actions": [
-                    # We reuse the respond_swap logic! We just pass the claimant's ID as the target_id now.
                     {"type": "Action.Submit", "title": "✅ Confirm Claim", "data": {"callback_keyword": "respond_swap", "action": "accept", "swap_id": swap_id}}
                 ]
             }
