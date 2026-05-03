@@ -736,13 +736,12 @@ class SubmitSwapRequestCommand(Command):
         active_bot = bot.bot_instance
 
         if is_open:
-            # --- THE ULTIMATE SPACE ID FETCH ---
             # 1. Try the requester's primary team
             cur.execute("SELECT webex_space_id FROM teams WHERE id = %s", (team_id,))
             res = cur.fetchone()
             space_id = res[0] if res else None
             
-            # 2. If that's empty, and the user is an admin, check if ANY of their managed teams have a space linked
+            # 2. If that's empty, check if ANY of their managed teams have a space linked
             if not space_id:
                 cur.execute("""
                     SELECT t.webex_space_id 
@@ -761,12 +760,14 @@ class SubmitSwapRequestCommand(Command):
             dates_str = ", ".join(return_dates)
             msg = f"📢 **Open Shift Swap!**\n\n**{req_name}** is offering their shift on **{my_shift_date_str}**.\nIn exchange, they are looking for a shift on: **{dates_str}**.\n\n*(To claim this, reply to the bot privately with `/claim_swap {swap_id}`)*"
             
-            import bot 
-            active_bot = bot.bot_instance
-            
-            if active_bot and space_id and str(space_id).strip() != "" and str(space_id) != "None":
+            # --- THE FIX: Bypass bot_instance and use the raw Webex API ---
+            if space_id and str(space_id).strip() != "" and str(space_id) != "None":
                 try:
-                    active_bot.teams.messages.create(roomId=str(space_id).strip(), markdown=msg)
+                    from webexteamssdk import WebexTeamsAPI
+                    import os
+                    # Create a fresh, temporary API connection just to send this one message
+                    temp_api = WebexTeamsAPI(access_token=os.getenv("WEBEX_BOT_TOKEN"))
+                    temp_api.messages.create(roomId=str(space_id).strip(), markdown=msg)
                 except Exception as e:
                     return f"❌ Error: The swap was saved, but the bot could not post to the Team Space. Reason: {e}"
             else:
