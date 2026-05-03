@@ -753,72 +753,86 @@ class SubmitSwapRequestCommand(Command):
         active_bot = bot.bot_instance
 
         if is_open:
-            # 1. Try the requester's primary team
-            cur.execute("SELECT webex_space_id FROM teams WHERE id = %s", (team_id,))
-            res = cur.fetchone()
-            space_id = res[0] if res else None
-            
-            # 2. If that's empty, check if ANY of their managed teams have a space linked
-            if not space_id:
-                cur.execute("""
-                    SELECT t.webex_space_id 
-                    FROM teams t
-                    JOIN user_teams ut ON t.id = ut.team_id
-                    JOIN users u ON ut.user_id = u.id
-                    WHERE u.email = %s AND t.webex_space_id IS NOT NULL
-                    LIMIT 1
-                """, (sender,))
-                res_admin = cur.fetchone()
-                if res_admin:
-                    space_id = res_admin[0]
-                    
-            cur.close(); conn.close()
-            
-            # --- NEW: Build the Adaptive Card ---
-            dates_str = ", ".join(return_dates)
-            
-            broadcast_card = {
-                "contentType": "application/vnd.microsoft.card.adaptive",
-                "content": {
-                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                    "type": "AdaptiveCard",
-                    "version": "1.2",
-                    "body": [
-                        {"type": "TextBlock", "text": "📢 Open Shift Swap!", "weight": "Bolder", "size": "Medium", "color": "Attention"},
-                        {"type": "TextBlock", "text": f"**{req_name}** is offering their shift on **{my_shift_date_str}**.", "wrap": True},
-                        {"type": "TextBlock", "text": f"In exchange, they are looking for a shift on:\n**{dates_str}**", "wrap": True}
-                    ],
-                    "actions": [
-                        {
-                            "type": "Action.Submit", 
-                            "title": "✋ Claim this Shift", 
-                            "data": {
-                                "callback_keyword": "claim_open_swap_button", 
-                                "swap_id": swap_id
-                            }
-                        }
-                    ]
-                }
-            }
-            
-            if space_id and str(space_id).strip() != "" and str(space_id) != "None":
-                try:
-                    from webexpythonsdk import WebexAPI
-                    import os
-                    temp_api = WebexAPI(access_token=os.getenv("WEBEX_BOT_TOKEN"))
-                    
-                    # Send the Card instead of Markdown text
-                    temp_api.messages.create(
-                        roomId=str(space_id).strip(), 
-                        text="Open Shift Swap Available!", # Fallback text for mobile notifications
-                        attachments=[broadcast_card]
-                    )
-                except Exception as e:
-                    return f"❌ Error: The swap was saved, but the bot could not post to the Team Space. Reason: {e}"
-            else:
-                return f"⚠️ The swap was saved, but no valid Space ID was found in the database for Team {team_id} to broadcast it."
+            # --- SMART OPEN MARKET: TARGETED BLAST ---
+            # 1. Find the "Perfect Fits"
+            cur.execute("""
+                SELECT e.id, e.name, e.webex_email, r.shift_date 
+                FROM engineers e
+                JOIN roster_assignments r ON e.id = r.engineer_id
+                WHERE e.team_id = %s AND e.id != %s AND e.is_active = TRUE
+                  AND r.shift_date = ANY(%s::date[])
+            """, (team_id, req_id, return_dates))
+            potential_targets = cur.fetchall()
+
+            perfect_fits = []
+            for t_id, t_name, t_email, t_shift in potential_targets:
+                # Check if the swap is 100% safe for BOTH people
+                target_safe = is_shift_safe(t_id, my_shift_date, team_id)
+                alice_safe = is_shift_safe(req_id, t_shift, team_id)
                 
-            return "✅ Your Open Market swap has been broadcasted to the Team Space!"
+                if target_safe and alice_safe:
+                    perfect_fits.append((t_id, t_name, t_email, t_shift))
+
+            import bot 
+            active_bot = bot.bot_instance
+
+            if perfect_fits and active_bot:
+                # 2. Send DMs to all Perfect Fits
+                sent_count = 0
+                for t_id, t_name, t_email, t_shift in perfect_fits:
+                    # We create a "shadow" direct swap record for each person so they can respond
+                    cur.execute("""
+                        INSERT INTO shift_swaps (team_id, requester_id, target_id, requester_shift_date, acceptable_return_dates, is_open_market, parent_swap_id)
+                        VALUES (%s, %s, %s, %s, %s::date[], FALSE, %s) RETURNING id
+                    """, (team_id, req_id, t_id, my_shift_date, [t_shift], swap_id))
+                    shadow_swap_id = cur.fetchone()[0]
+                    
+                    card = {
+                        "contentType": "application/vnd.microsoft.card.adaptive",
+                        "content": {
+                            "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                            "type": "AdaptiveCard",
+                            "version": "1.2",
+                            "body": [
+                                {"type": "TextBlock", "text": "🔄 Perfect Match Swap Request!", "weight": "Bolder", "size": "Medium", "color": "Good"},
+                                {"type": "TextBlock", "text": f"**{req_name}** wants to give you their shift on **{my_shift_date_str}**.", "wrap": True},
+                                {"type": "TextBlock", "text": f"In exchange, they will take your shift on **{t_shift.strftime('%Y-%m-%d')}**.", "wrap": True},
+                                {"type": "TextBlock", "text": "💡 *This swap is a perfect match and breaks no rest rules for either of you!*", "wrap": True, "size": "Small", "isSubtle": True}
+                            ],
+                            "actions": [
+                                {"type": "Action.Submit", "title": "✅ Accept Swap", "data": {"callback_keyword": "respond_swap", "action": "accept", "swap_id": shadow_swap_id, "selected_return_shift": str(t_shift)}},
+                                {"type": "Action.Submit", "title": "❌ Decline", "data": {"callback_keyword": "respond_swap", "action": "decline", "swap_id": shadow_swap_id}}
+                            ]
+                        }
+                    }
+                    try:
+                        active_bot.teams.messages.create(toPersonEmail=t_email, attachments=[card])
+                        sent_count += 1
+                    except Exception:
+                        pass
+                
+                conn.commit()
+                cur.close(); conn.close()
+                return f"✅ Your swap request has been sent directly to **{sent_count}** engineers who are a perfect match.\n\nIf no one accepts within 2 hours, it will be broadcasted to the whole Team Space."
+
+            else:
+                # 3. No Perfect Fits Found -> Broadcast Immediately
+                cur.execute("SELECT webex_space_id FROM teams WHERE id = %s", (team_id,))
+                res = cur.fetchone()
+                space_id = res[0] if res else None
+                cur.close(); conn.close()
+                
+                dates_str = ", ".join(return_dates)
+                msg = f"📢 **Open Shift Swap!**\n\n**{req_name}** is offering their shift on **{my_shift_date_str}**.\nIn exchange, they are looking for a shift on: **{dates_str}**.\n\n*(To claim this, reply to the bot privately with `/claim_swap {swap_id}`)*"
+                
+                if active_bot and space_id and str(space_id).strip() != "" and str(space_id) != "None":
+                    try:
+                        active_bot.teams.messages.create(roomId=str(space_id).strip(), markdown=msg)
+                        return "✅ No perfect matches were found, so your swap has been broadcasted to the Team Space!"
+                    except Exception as e:
+                        return f"❌ Error: The swap was saved, but the bot could not post to the Team Space. Reason: {e}"
+                else:
+                    return "⚠️ No perfect matches were found, and no valid Space ID was found to broadcast the offer."
         
         else:
             cur.execute("SELECT name, webex_email FROM engineers WHERE id = %s", (target_id,))
@@ -965,6 +979,37 @@ class RespondSwapCommand(Command):
                 WHERE requester_id = %s AND requester_shift_date = %s AND status = 'pending' AND id != %s
             """, (req_id, req_shift_date, swap_id))
             
+            # --- NEW: SMART OPEN MARKET CLEANUP ---
+            cur.execute("SELECT parent_swap_id FROM shift_swaps WHERE id = %s", (swap_id,))
+            parent_res = cur.fetchone()
+            parent_id = parent_res[0] if parent_res else None
+
+            if parent_id:
+                # 1. Mark the parent Open Market request as completed
+                cur.execute("UPDATE shift_swaps SET status = 'completed' WHERE id = %s", (parent_id,))
+                
+                # 2. Find all other pending shadow swaps for this parent
+                cur.execute("""
+                    SELECT s.id, t.webex_email 
+                    FROM shift_swaps s
+                    JOIN engineers t ON s.target_id = t.id
+                    WHERE s.parent_swap_id = %s AND s.status = 'pending' AND s.id != %s
+                """, (parent_id, swap_id))
+                losers = cur.fetchall()
+                
+                # 3. Expire them and notify the losers
+                for loser_swap_id, loser_email in losers:
+                    cur.execute("UPDATE shift_swaps SET status = 'expired' WHERE id = %s", (loser_swap_id,))
+                    if bot_instance and loser_email:
+                        try:
+                            bot_instance.teams.messages.create(
+                                toPersonEmail=loser_email, 
+                                markdown=f"ℹ️ **Update:** Thank you for considering, but **{req_name}**'s shift swap on **{req_shift_date}** has already been claimed by another engineer."
+                            )
+                        except Exception:
+                            pass
+            # --------------------------------------
+            
             conn.commit()
             bot_audit("SWAP_ACCEPTED", team_id=team_id, entity_id=swap_id, details={"is_open_market": is_open_market})
 
@@ -1097,15 +1142,18 @@ class ClaimOpenSwapCommand(Command):
 # ==========================================
 def tick_relief_timers():
     """Called by APScheduler every 5 minutes."""
-    print("[SCHEDULER] Ticking relief timers...")
+    print("[SCHEDULER] Ticking relief and swap timers...")
+    from bot import bot_instance
     conn = get_db_connection()
     cur = conn.cursor()
     
+    # ==========================================
+    # 1. AUTOMATED RELIEF TIMERS
+    # ==========================================
     cur.execute("SELECT id, team_id, shift_date FROM relief_requests WHERE status = 'active'")
     active_requests = cur.fetchall()
     
     for req_id, team_id, shift_date in active_requests:
-        # Check Friday Deadline
         cur.execute("SELECT shift_end_time FROM teams WHERE id = %s", (team_id,))
         shift_end = cur.fetchone()[0]
         deadline = get_friday_deadline(shift_date, shift_end)
@@ -1116,22 +1164,126 @@ def tick_relief_timers():
             fail_relief_request(req_id, "Friday deadline reached.")
             continue
 
-        # Add active minutes if within shift hours
         if is_within_shift_hours(team_id):
             cur.execute("UPDATE relief_candidates SET active_minutes = active_minutes + 5 WHERE request_id = %s AND status IN ('pending', 'pinged')", (req_id,))
             conn.commit()
             
-            # Check for Pings (60 mins)
             cur.execute("SELECT id FROM relief_candidates WHERE request_id = %s AND status = 'pending' AND active_minutes >= 60", (req_id,))
             for (cand_id,) in cur.fetchall():
                 cur.execute("UPDATE relief_candidates SET status = 'pinged' WHERE id = %s", (cand_id,))
                 conn.commit()
-                # Send ping via bot_instance...
+                # (Send ping via bot_instance logic here)
                 
-            # Check for Escalations (120 mins)
             cur.execute("SELECT id FROM relief_candidates WHERE request_id = %s AND status = 'pinged' AND active_minutes >= 120", (req_id,))
             for (cand_id,) in cur.fetchall():
-                # We leave their status as 'pinged' so their card stays open, but we trigger the next dispatch
                 escalate_relief_request(req_id)
+
+    # ==========================================
+    # 2. DIRECT SWAP TIMERS (1-on-1)
+    # ==========================================
+    cur.execute("""
+        SELECT s.id, s.team_id, s.requester_shift_date, s.created_at, s.reminder_sent,
+               r.name, r.webex_email, t.name, t.webex_email
+        FROM shift_swaps s
+        JOIN engineers r ON s.requester_id = r.id
+        JOIN engineers t ON s.target_id = t.id
+        WHERE s.status = 'pending' AND s.is_open_market = FALSE AND s.parent_swap_id IS NULL
+    """)
+    pending_swaps = cur.fetchall()
+
+    now_ist = datetime.now(IST)
+
+    for swap in pending_swaps:
+        swap_id, team_id, req_shift_date, created_at, reminder_sent, req_name, req_email, target_name, target_email = swap
+        
+        cur.execute("SELECT shift_end_time FROM teams WHERE id = %s", (team_id,))
+        shift_end = cur.fetchone()[0]
+        deadline = get_friday_deadline(req_shift_date, shift_end)
+        
+        if now_ist > deadline:
+            cur.execute("UPDATE shift_swaps SET status = 'expired' WHERE id = %s", (swap_id,))
+            conn.commit()
+            bot_audit("DIRECT_SWAP_EXPIRED", team_id=team_id, entity_id=swap_id, details={"reason": "friday_deadline"})
+            
+            if bot_instance and req_email:
+                bot_instance.teams.messages.create(toPersonEmail=req_email, markdown=f"❌ **Swap Expired:** The Friday deadline has passed. Your request to swap **{req_shift_date.strftime('%A, %d %b')}** with {target_name} has been cancelled.")
+            if bot_instance and target_email:
+                bot_instance.teams.messages.create(toPersonEmail=target_email, markdown=f"ℹ️ **Swap Expired:** The Friday deadline has passed. The swap request from {req_name} is no longer valid.")
+            continue
+
+        created_at_ist = created_at.replace(tzinfo=IST)
+        time_elapsed = now_ist - created_at_ist
+        
+        if not reminder_sent and time_elapsed > timedelta(hours=2):
+            cur.execute("UPDATE shift_swaps SET reminder_sent = TRUE WHERE id = %s", (swap_id,))
+            conn.commit()
+            bot_audit("DIRECT_SWAP_REMINDER", team_id=team_id, entity_id=swap_id)
+            
+            if bot_instance and target_email:
+                bot_instance.teams.messages.create(toPersonEmail=target_email, markdown=f"⏳ **Reminder:** {req_name} is still waiting for your response regarding the shift swap for **{req_shift_date.strftime('%A, %d %b')}**.\nPlease check your previous messages to Accept or Decline.")
+
+    # ==========================================
+    # 3. SMART OPEN MARKET BROADCAST TIMERS
+    # ==========================================
+    cur.execute("""
+        SELECT s.id, s.team_id, s.requester_shift_date, s.acceptable_return_dates, s.created_at,
+               r.name
+        FROM shift_swaps s
+        JOIN engineers r ON s.requester_id = r.id
+        WHERE s.is_open_market = TRUE AND s.status = 'pending' AND s.reminder_sent = FALSE
+    """)
+    pending_open_swaps = cur.fetchall()
+
+    for swap in pending_open_swaps:
+        swap_id, team_id, req_shift_date, return_dates, created_at, req_name = swap
+        
+        created_at_ist = created_at.replace(tzinfo=IST)
+        time_elapsed = now_ist - created_at_ist
+        
+        # If 2 hours have passed, broadcast it to the public Team Space!
+        if time_elapsed > timedelta(hours=2):
+            cur.execute("UPDATE shift_swaps SET reminder_sent = TRUE WHERE id = %s", (swap_id,))
+            
+            cur.execute("SELECT webex_space_id FROM teams WHERE id = %s", (team_id,))
+            res = cur.fetchone()
+            space_id = res[0] if res else None
+            
+            if space_id and str(space_id).strip() != "" and str(space_id) != "None":
+                dates_str = ", ".join([d.strftime('%Y-%m-%d') for d in return_dates])
+                
+                broadcast_card = {
+                    "contentType": "application/vnd.microsoft.card.adaptive",
+                    "content": {
+                        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                        "type": "AdaptiveCard",
+                        "version": "1.2",
+                        "body": [
+                            {"type": "TextBlock", "text": "📢 Open Shift Swap!", "weight": "Bolder", "size": "Medium", "color": "Attention"},
+                            {"type": "TextBlock", "text": f"**{req_name}** is offering their shift on **{req_shift_date.strftime('%Y-%m-%d')}**.", "wrap": True},
+                            {"type": "TextBlock", "text": f"In exchange, they are looking for a shift on:\n**{dates_str}**", "wrap": True}
+                        ],
+                        "actions": [
+                            {
+                                "type": "Action.Submit", 
+                                "title": "✋ Claim this Shift", 
+                                "data": {
+                                    "callback_keyword": "claim_open_swap_button", 
+                                    "swap_id": swap_id
+                                }
+                            }
+                        ]
+                    }
+                }
+                
+                try:
+                    from webexpythonsdk import WebexAPI
+                    import os
+                    temp_api = WebexAPI(access_token=os.getenv("WEBEX_BOT_TOKEN"))
+                    temp_api.messages.create(roomId=str(space_id).strip(), text="Open Shift Swap Available!", attachments=[broadcast_card])
+                except Exception as e:
+                    print(f"[CRITICAL] Failed to broadcast Open Market swap to Team Space: {e}")
+            conn.commit()
+
+    cur.close(); conn.close()
 
     cur.close(); conn.close()
