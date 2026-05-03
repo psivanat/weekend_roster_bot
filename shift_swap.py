@@ -736,20 +736,33 @@ class SubmitSwapRequestCommand(Command):
         active_bot = bot.bot_instance
 
         if is_open:
+            # --- THE ULTIMATE SPACE ID FETCH ---
+            # 1. Try the requester's primary team
             cur.execute("SELECT webex_space_id FROM teams WHERE id = %s", (team_id,))
-            space_id = cur.fetchone()[0]
+            res = cur.fetchone()
+            space_id = res[0] if res else None
+            
+            # 2. If that's empty, and the user is an admin, check if ANY of their managed teams have a space linked
+            if not space_id:
+                cur.execute("""
+                    SELECT t.webex_space_id 
+                    FROM teams t
+                    JOIN user_teams ut ON t.id = ut.team_id
+                    JOIN users u ON ut.user_id = u.id
+                    WHERE u.email = %s AND t.webex_space_id IS NOT NULL
+                    LIMIT 1
+                """, (sender,))
+                res_admin = cur.fetchone()
+                if res_admin:
+                    space_id = res_admin[0]
+                    
             cur.close(); conn.close()
-            
-            # --- EXTREME DEBUGGING: Print the raw type and value to Webex ---
-            import bot 
-            active_bot = bot.bot_instance
-            
-            debug_msg = f"🛠️ **EXTREME DEBUG:**\n- Team ID: {team_id}\n- Raw Space ID: `{repr(space_id)}`\n- Type: {type(space_id)}"
-            if active_bot:
-                active_bot.teams.messages.create(toPersonEmail=sender, markdown=debug_msg)
             
             dates_str = ", ".join(return_dates)
             msg = f"📢 **Open Shift Swap!**\n\n**{req_name}** is offering their shift on **{my_shift_date_str}**.\nIn exchange, they are looking for a shift on: **{dates_str}**.\n\n*(To claim this, reply to the bot privately with `/claim_swap {swap_id}`)*"
+            
+            import bot 
+            active_bot = bot.bot_instance
             
             if active_bot and space_id and str(space_id).strip() != "" and str(space_id) != "None":
                 try:
@@ -757,7 +770,7 @@ class SubmitSwapRequestCommand(Command):
                 except Exception as e:
                     return f"❌ Error: The swap was saved, but the bot could not post to the Team Space. Reason: {e}"
             else:
-                return "⚠️ The swap was saved, but no valid Space ID was found in the database to broadcast it."
+                return f"⚠️ The swap was saved, but no valid Space ID was found in the database for Team {team_id} to broadcast it."
                 
             return "✅ Your Open Market swap has been broadcasted to the Team Space!"
         
