@@ -763,10 +763,10 @@ class SubmitSwapRequestCommand(Command):
             # --- THE FIX: Bypass bot_instance and use the raw Webex API ---
             if space_id and str(space_id).strip() != "" and str(space_id) != "None":
                 try:
-                    from webexteamssdk import WebexTeamsAPI
+                    from webexpythonsdk import WebexAPI
                     import os
                     # Create a fresh, temporary API connection just to send this one message
-                    temp_api = WebexTeamsAPI(access_token=os.getenv("WEBEX_BOT_TOKEN"))
+                    temp_api = WebexAPI(access_token=os.getenv("WEBEX_BOT_TOKEN"))
                     temp_api.messages.create(roomId=str(space_id).strip(), markdown=msg)
                 except Exception as e:
                     return f"❌ Error: The swap was saved, but the bot could not post to the Team Space. Reason: {e}"
